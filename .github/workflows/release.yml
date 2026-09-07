@@ -1,0 +1,82 @@
+name: release
+on:
+  push:
+    branches: ["master"]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Re-publish even if the tag exists (updates that release in place)"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+
+      # A push to master publishes v<manifest.version> if that tag does not exist
+      # yet, so bumping the version in manifest.json is what cuts a release. A
+      # push of an explicit v* tag still works and must match the manifest.
+      # Notes come from docs/release-notes/<tag>.md when that file exists;
+      # otherwise GitHub generates the usual merged-PR list.
+      - name: Decide whether to release
+        id: gate
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          MV=$(python -c "import json; print(json.load(open('manifest.json'))['version'])")
+          TAG="v$MV"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            [ "$TAG" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} != manifest $TAG"; exit 1; }
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "$FORCE" = "true" ]; then
+            echo "::notice::forced — re-publishing $TAG"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::notice::$TAG already released — bump version in manifest.json to publish a new one"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          NOTES="docs/release-notes/$TAG.md"
+          if [ -f "$NOTES" ]; then
+            echo "notes=$NOTES" >> "$GITHUB_OUTPUT"
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "notes=" >> "$GITHUB_OUTPUT"
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test and pack
+        if: steps.gate.outputs.release == 'true'
+        run: |
+          python -m py_compile server.py
+          python tests/smoke.py
+          python tests/protocol_conformance.py
+          npx -y @anthropic-ai/mcpb@latest validate manifest.json
+          mkdir -p build_dir dist
+          cp server.py manifest.json build_dir/
+          npx -y @anthropic-ai/mcpb@latest pack build_dir "dist/claude-codex-bridge-${{ steps.gate.outputs.tag }}.mcpb"
+          python tests/pack_check.py "dist/claude-codex-bridge-${{ steps.gate.outputs.tag }}.mcpb"
+
+      - uses: softprops/action-gh-release@v2
+        if: steps.gate.outputs.release == 'true'
+        with:
+          tag_name: ${{ steps.gate.outputs.tag }}
+          files: dist/*.mcpb
+          body_path: ${{ steps.gate.outputs.notes }}
+          generate_release_notes: ${{ steps.gate.outputs.generate }}
+          make_latest: true

@@ -1,0 +1,48 @@
+name: ci
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Compile
+        run: python -m py_compile server.py
+      - name: Protocol smoke test
+        run: python tests/smoke.py
+      - name: Protocol conformance (fields we read exist in the pinned schema)
+        run: python tests/protocol_conformance.py
+      - name: Windows branches, simulated on every OS
+        run: python tests/windows_sim.py
+      - name: 1M-context scripts, against a stand-in codex
+        run: python tests/enable_1m_sim.py
+      # Packaging is platform-independent; do it once.
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Linux'
+        with: { node-version: "22" }
+      - name: Validate manifest
+        if: runner.os == 'Linux'
+        run: npx -y @anthropic-ai/mcpb@latest validate manifest.json
+      - name: Pack .mcpb
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p build_dir dist
+          cp server.py manifest.json build_dir/
+          npx -y @anthropic-ai/mcpb@latest pack build_dir dist/claude-codex-bridge.mcpb
+      # The artifact is what installs on both platforms: check it, not just the sources.
+      - name: Check the packed .mcpb
+        if: runner.os == 'Linux'
+        run: python tests/pack_check.py dist/claude-codex-bridge.mcpb
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: claude-codex-bridge.mcpb
+          path: dist/claude-codex-bridge.mcpb
+          retention-days: 30

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# built by the release workflow, never committed
+*.mcpb
+
+# macOS finder droppings
+.DS_Store
