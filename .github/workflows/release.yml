@@ -70,13 +70,20 @@ jobs:
           mkdir -p build_dir dist
           cp server.py manifest.json build_dir/
           npx -y @anthropic-ai/mcpb@latest pack build_dir "dist/claude-codex-bridge-${{ steps.gate.outputs.tag }}.mcpb"
-          python tests/pack_check.py "dist/claude-codex-bridge-${{ steps.gate.outputs.tag }}.mcpb"
+          # The 1M-context scripts ship beside the bundle under unversioned names,
+          # so releases/latest/download/enable-1m-context.sh is a stable URL.
+          cp scripts/enable-1m-context.sh scripts/enable-1m-context.ps1 dist/
+          python tests/pack_check.py "dist/claude-codex-bridge-${{ steps.gate.outputs.tag }}.mcpb" \
+            dist/enable-1m-context.sh dist/enable-1m-context.ps1
 
       - uses: softprops/action-gh-release@v2
         if: steps.gate.outputs.release == 'true'
         with:
           tag_name: ${{ steps.gate.outputs.tag }}
-          files: dist/*.mcpb
+          files: |
+            dist/*.mcpb
+            dist/enable-1m-context.sh
+            dist/enable-1m-context.ps1
           body_path: ${{ steps.gate.outputs.notes }}
           generate_release_notes: ${{ steps.gate.outputs.generate }}
           make_latest: true

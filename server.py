@@ -86,7 +86,7 @@ APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, 
 
 RESULTS: completed carries output (text, or your schema's JSON) plus bridge-stamped provenance - trust that over anything the model says about itself. Errors come back verbatim, including schema rejections."""
 
-SERVER_INFO = {"name": "codex", "version": "0.13.1"}
+SERVER_INFO = {"name": "codex", "version": "0.13.2"}
 
 # Friendly slug -> (wire model, reasoning effort). One caller-facing knob; the
 # app-server takes them as separate per-turn fields.

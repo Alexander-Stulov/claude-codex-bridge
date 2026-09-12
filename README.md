@@ -110,15 +110,24 @@ copying files cannot register one):
 
 ## Optional: raise the context window
 
+Every [release](https://github.com/Alexander-Stulov/claude-codex-bridge/releases)
+carries both editions of the script next to the `.mcpb`, so no clone is needed.
+On macOS:
+
 ```bash
-./scripts/enable-1m-context.sh
+curl -fsSLO https://github.com/Alexander-Stulov/claude-codex-bridge/releases/latest/download/enable-1m-context.sh
+bash enable-1m-context.sh
 ```
 
 On Windows, run the PowerShell edition — same behaviour, same checks:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\enable-1m-context.ps1
+Invoke-WebRequest https://github.com/Alexander-Stulov/claude-codex-bridge/releases/latest/download/enable-1m-context.ps1 -OutFile enable-1m-context.ps1
+powershell -ExecutionPolicy Bypass -File enable-1m-context.ps1
 ```
+
+From a checkout, run them in place: `./scripts/enable-1m-context.sh`, or
+`powershell -ExecutionPolicy Bypass -File scripts\enable-1m-context.ps1`.
 
 Codex ships GPT-6 Astra and GPT-5.6 Sol, Terra and Luna alike at a **272,000**-token
 context window (258,400 after its 95% headroom), even though the models support
@@ -317,6 +326,11 @@ Merging to `master` publishes `v<version>` from `manifest.json` — a release is
 whenever that version is one that has not been tagged before, so bumping the
 version in `manifest.json` is what ships. Pushes to `master` that leave the
 version alone build and test as usual and publish nothing.
+
+Each release ships three assets: `claude-codex-bridge-v<version>.mcpb`, and the
+`enable-1m-context.sh` / `enable-1m-context.ps1` scripts under unversioned names, so
+`releases/latest/download/<script>` always points at the newest copy.
+`tests/pack_check.py` checks all three before they are published.
 
 Release notes come from `docs/release-notes/v<version>.md` when that file exists;
 without it GitHub generates the usual list of merged PRs. Re-run the workflow
