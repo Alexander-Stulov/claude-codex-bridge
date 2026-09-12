@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Check a packed .mcpb — the artifact CI uploads and a release ships — not the sources.
+"""Check what a release ships — the packed .mcpb and the 1M-context scripts — not the sources.
 
-    python tests/pack_check.py dist/claude-codex-bridge.mcpb
+    python tests/pack_check.py dist/claude-codex-bridge.mcpb [dist/enable-1m-context.sh ...]
 
 The same bundle installs on macOS and Windows, so everything both platforms depend on
 is pinned here: the archive holds exactly the two files at its root, server.py ships
 byte-identical to the checkout with LF endings, and the manifest inside names both
 platforms, the Windows interpreter override, the same tools the server registers and
-the same version the server reports."""
+the same version the server reports.
+
+Each script given after the bundle must be one of scripts/enable-1m-context.{sh,ps1},
+under its own name, byte-identical to the checkout with LF endings — bash chokes on a
+CR — and the .ps1 must stay ASCII: Windows PowerShell 5.1 reads a BOM-less file as the
+ANSI code page, so one em dash in a string is enough to break the parse."""
 import importlib.util, json, os, sys, zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -57,9 +62,31 @@ def check(bundle):
     return manifest, packed
 
 
+SCRIPTS = ("enable-1m-context.sh", "enable-1m-context.ps1")
+
+
+def check_script(path):
+    name = os.path.basename(path)
+    assert name in SCRIPTS, f"{name} is not a release script — expected one of {SCRIPTS}"
+    with open(path, "rb") as f:
+        shipped = f.read()
+    assert b"\r" not in shipped, f"{name} has CR bytes — ship it from an LF checkout"
+    with open(os.path.join(ROOT, "scripts", name), "rb") as f:
+        source = f.read().replace(b"\r\n", b"\n")
+    assert shipped == source, f"{name} differs from scripts/{name}"
+    if name.endswith(".sh"):
+        assert shipped.startswith(b"#!/usr/bin/env bash\n"), f"{name} lost its bash shebang"
+    else:
+        bad = [n for n, line in enumerate(shipped.split(b"\n"), 1) if any(b > 0x7F for b in line)]
+        assert not bad, f"{name} has non-ASCII on lines {bad} — Windows PowerShell 5.1 misreads it"
+    return len(shipped)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         sys.exit(__doc__)
     manifest, packed = check(sys.argv[1])
     print(f"pack check: {sys.argv[1]} ok — v{manifest['version']}, {len(packed)} bytes server.py, "
           f"{len(manifest['tools'])} tools, platforms {manifest['compatibility']['platforms']}")
+    for script in sys.argv[2:]:
+        print(f"pack check: {script} ok — {check_script(script)} bytes")

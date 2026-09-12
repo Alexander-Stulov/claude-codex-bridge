@@ -36,13 +36,22 @@ jobs:
           mkdir -p build_dir dist
           cp server.py manifest.json build_dir/
           npx -y @anthropic-ai/mcpb@latest pack build_dir dist/claude-codex-bridge.mcpb
-      # The artifact is what installs on both platforms: check it, not just the sources.
-      - name: Check the packed .mcpb
+          cp scripts/enable-1m-context.sh scripts/enable-1m-context.ps1 dist/
+      # The artifacts are what installs on both platforms: check them, not just the sources.
+      - name: Check the packed .mcpb and the 1M-context scripts
         if: runner.os == 'Linux'
-        run: python tests/pack_check.py dist/claude-codex-bridge.mcpb
+        run: python tests/pack_check.py dist/claude-codex-bridge.mcpb dist/enable-1m-context.sh dist/enable-1m-context.ps1
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:
           name: claude-codex-bridge.mcpb
           path: dist/claude-codex-bridge.mcpb
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: enable-1m-context-scripts
+          path: |
+            dist/enable-1m-context.sh
+            dist/enable-1m-context.ps1
           retention-days: 30
