@@ -323,9 +323,11 @@ Three are worth knowing:
   million tokens — so spend it on questions that merit it, and run it on
   `sol-high`, `sol-xhigh` or `astra-*` rather than a scout. Ask for the report in chat ("no
   document, deck or site") with a Sources section; `codex_poll` returns it whole.
-  When it is worth keeping — it usually is — the caller writes the cleaned report
-  to markdown (`docs/research/<topic>.md`, say) with its sources; the bridge stores
-  nothing. Its clarifying-question step (`request_user_input`) cannot reach the
+  When it is worth keeping — it usually is — add a turn on the same thread with
+  `cwd` set to the project and ask codex to save the report to markdown
+  (`docs/research/<topic>.md`, say): it writes it verbatim with every source, in
+  about a minute on `terra-medium`. Or write a condensed version yourself from the
+  poll output. The bridge stores nothing. Its clarifying-question step (`request_user_input`) cannot reach the
   caller through the bridge yet, so tell it to state assumptions and proceed.
 - **Chrome** — the user's real Google Chrome through the ChatGPT Chrome extension:
   logged-in sessions, open tabs, page content. Ask for the Chrome plugin by name

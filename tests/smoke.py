@@ -562,3 +562,31 @@ for phrase in ("$deep-research", "codex_capabilities", "Computer Use", "Chrome",
     assert phrase in _plug, f"PLUGINS guidance lost {phrase!r}"
 assert "both modes" in bridge.INSTRUCTIONS.split("NETWORK:")[1].split("\n")[0]
 print("smoke: capabilities inventory shaped, queried, resilient; app-server asked in the right order")
+
+# --- a follow-up turn that moves the thread reports where it now works -------------
+# A thread starts in scratch, a later turn passes a real cwd: the work lands there, so
+# the result and provenance must say project, not the label from creation time.
+_calls2 = []
+_real_ensure, _real_request, _real_scratch = bridge.APP.ensure, bridge.APP.request, bridge.new_scratch
+_tmp_scratch, _tmp_proj = _tf.mkdtemp(prefix="scratch-"), _tf.mkdtemp(prefix="proj-")
+bridge.new_scratch = lambda: _tmp_scratch
+bridge.APP.ensure = lambda: None
+def _fake_submit_request(method, params, timeout=120):
+    _calls2.append(method)
+    return {"thread/start": {"thread": {"id": "t30"}},
+            "turn/start": {"turn": {"id": f"u{len(_calls2)}"}}}[method]
+bridge.APP.request = _fake_submit_request
+try:
+    r1 = bridge.codex_submit({"prompt": "research it", "model": "sol-high"})
+    assert r1["workspace"] == "scratch" and r1["cwd"] == _tmp_scratch, r1
+    bridge.APP.threads["t30"]["state"] = "completed"          # the research turn finished
+    r2 = bridge.codex_submit({"prompt": "save it", "model": "terra-medium", "thread": "t30", "cwd": _tmp_proj})
+    assert r2["workspace"] == "project" and r2["cwd"] == os.path.realpath(_tmp_proj), r2
+    assert bridge._provenance(bridge.APP.threads["t30"])["workspace"] == "project"
+    bridge.APP.threads["t30"]["state"] = "completed"
+    r3 = bridge.codex_submit({"prompt": "again", "model": "terra-medium", "thread": "t30"})
+    assert r3["workspace"] == "project" and r3["cwd"] == os.path.realpath(_tmp_proj), "no cwd given: stays where it moved to"
+finally:
+    bridge.APP.ensure, bridge.APP.request, bridge.new_scratch = _real_ensure, _real_request, _real_scratch
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: a moved thread reports its real workspace")
