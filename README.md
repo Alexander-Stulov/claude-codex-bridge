@@ -173,7 +173,7 @@ reached the bridge (not only `codex exec`), run `python3 tests/context_live.py`.
 | Tool | Purpose |
 |---|---|
 | `codex_check` | Preflight: codex present, version, models, threads in flight |
-| `codex_capabilities` | What codex can do here: plugins and their `$skill` mentions, MCP servers and tools, connected apps |
+| `codex_capabilities` | What codex can do here: plugins and their skills, MCP servers and tools, connected apps |
 | `codex_submit` | Start a thread, add a turn to one, or steer a running turn. Returns immediately |
 | `codex_poll` | State, progress snapshot, pending approvals, and the complete output once done |
 | `codex_approve` | Rule on an approval the thread is parked on — a command, file change, permission, or an MCP server's elicitation |
@@ -299,22 +299,27 @@ the sandbox.
 
 codex brings its own plugins, MCP servers and connected ChatGPT apps, and the
 bridge exposes them as they are. `codex_capabilities` asks the app-server what is
-installed and returns one map: every enabled plugin with the `$skill` mentions it
+installed and returns one map: every enabled plugin with the skills it
 contributes, every MCP server with its tools, the connected apps, and the standing
 facts (network is always on). `query` narrows it to matching skills, tools, plugins
 and apps and adds their descriptions. Call it before briefing work that might lean
 on one.
 
-A skill is invoked by writing its mention in the prompt — `$deep-research`,
-`$documents`, `$presentations` — and also fires implicitly when the brief matches
-its description. An app is mentioned as `[$Name](app://connector_id)`; MCP tools by
-name. Plugins are installed and enabled in codex itself (`codex plugin list|add`,
+A skill is invoked by passing its name in `codex_submit`'s `skills` —
+`["deep-research-work:deep-research"]`, or just `["deep-research"]` when that is
+unique — and the bridge sends its instructions with the turn's input as the
+structured skill item codex's own clients use. A `$skill` typed into the prompt is
+*not* honoured through the app-server: two live threads asked to quote the heading
+of the skill such a mention loaded answered NONE, while the structured item made
+the model quote it. Skills also fire implicitly when the brief matches their
+description. An app is mentioned in the prompt as `[$Name](app://connector_id)`;
+MCP tools by name. Plugins are installed and enabled in codex itself (`codex plugin list|add`,
 the `[plugins."name@marketplace"]` tables in `~/.codex/config.toml`, or the ChatGPT
 app); the bridge changes nothing there.
 
 Three are worth knowing:
 
-- **Deep Research** (`$deep-research`) — OpenAI Deep Research inside codex:
+- **Deep Research** (`skills: ["deep-research"]`) — OpenAI Deep Research inside codex:
   multi-pass web research with cited sources, which Cowork and Claude Code threads
   lack natively. Through codex it is metered against the account's Codex/Work
   usage allowance rather than the Chat deep-research task quota (OpenAI help

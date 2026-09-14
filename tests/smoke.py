@@ -484,15 +484,15 @@ _apps = {"apps": [{"id": "connector_690a", "runtimeName": "Vercel", "enabled": T
 
 inv = bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps)
 assert "both modes" in inv["network"], inv["network"]
-assert "$" in inv["how_to_use"], inv["how_to_use"]
+assert "skills" in inv["how_to_use"], inv["how_to_use"]
 _byid = {p["id"]: p for p in inv["plugins"]}
 _dr = _byid["deep-research-work@openai-curated-remote"]
 assert _dr["name"] == "Deep Research" and _dr["enabled"] is True, _dr
-assert _dr["skills"] == ["$deep-research"], "a namespaced skill is mentioned by its own name: %r" % _dr
+assert _dr["skills"] == ["deep-research-work:deep-research"], _dr
 assert _byid["vercel@openai-curated-remote"]["enabled"] is False, "a disabled plugin is still listed, flagged"
-assert _byid["vercel@openai-curated-remote"]["skills"] == ["$vercel-queues"], _byid["vercel@openai-curated-remote"]
+assert _byid["vercel@openai-curated-remote"]["skills"] == ["vercel:vercel-queues"], _byid["vercel@openai-curated-remote"]
 assert _byid["chrome@openai-bundled"]["skills"] == [], _byid["chrome@openai-bundled"]
-assert inv["system_skills"] == ["$imagegen"], "system skills listed; a disabled skill is not offered: %r" % inv["system_skills"]
+assert inv["system_skills"] == ["imagegen"], "system skills listed; a disabled skill is not offered: %r" % inv["system_skills"]
 _srv = {s["name"]: s for s in inv["mcp_servers"]}
 assert _srv["MCP_DOCKER"]["tools"] == ["mcp-add", "mcp-find"], _srv["MCP_DOCKER"]
 assert _srv["cua_repl"]["plugin"] == "chrome@openai-bundled", _srv["cua_repl"]
@@ -509,11 +509,12 @@ assert "description" not in json.dumps(inv["plugins"]) and "Generate or edit" no
 # a query narrows to matches and brings the descriptions with them
 q = bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps, query="ReSearch")
 assert "plugins" not in q and q["query"] == "ReSearch", q
-_kinds = {(m["kind"], m.get("mention") or m.get("name")) for m in q["matches"]}
-assert ("skill", "$deep-research") in _kinds and ("plugin", "Deep Research") in _kinds, _kinds
+_kinds = {(m["kind"], m["name"]) for m in q["matches"]}
+assert ("skill", "deep-research-work:deep-research") in _kinds and ("plugin", "Deep Research") in _kinds, _kinds
 assert not any(m["kind"] == "tool" for m in q["matches"]), q["matches"]
 _skill_match = next(m for m in q["matches"] if m["kind"] == "skill")
 assert _skill_match["name"] == "deep-research-work:deep-research" and "cited artifact" in _skill_match["description"], _skill_match
+assert _skill_match["path"] == "/x/SKILL.md", "a match carries the path codex injects from"
 q2 = bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps, query="find")
 _tool = next(m for m in q2["matches"] if m["kind"] == "tool")
 assert _tool["name"] == "mcp-find" and _tool["server"] == "MCP_DOCKER" and "catalog" in _tool["description"], _tool
@@ -558,7 +559,7 @@ assert "query" in _cap["inputSchema"]["properties"], _cap["inputSchema"]
 for marker in ("CAPABILITIES:", "PLUGINS:", "NETWORK:"):
     assert marker in bridge.INSTRUCTIONS, f"instructions missing {marker!r}"
 _plug = bridge.INSTRUCTIONS.split("PLUGINS:")[1].split("NETWORK:")[0]
-for phrase in ("$deep-research", "codex_capabilities", "Computer Use", "Chrome", "sol", "quota", "markdown"):
+for phrase in ("deep-research", "codex_capabilities", "Computer Use", "Chrome", "sol", "quota", "markdown", "skills"):
     assert phrase in _plug, f"PLUGINS guidance lost {phrase!r}"
 assert "both modes" in bridge.INSTRUCTIONS.split("NETWORK:")[1].split("\n")[0]
 print("smoke: capabilities inventory shaped, queried, resilient; app-server asked in the right order")
@@ -590,3 +591,54 @@ finally:
     bridge.APP.ensure, bridge.APP.request, bridge.new_scratch = _real_ensure, _real_request, _real_scratch
     bridge.APP.threads.clear(); bridge.APP.requests.clear()
 print("smoke: a moved thread reports its real workspace")
+
+# --- explicit skills go on the wire as structured items, resolved from the catalog ----
+# A `$skill` written in the prompt is NOT honoured through the app-server: two live
+# threads answered NONE to "quote the first heading of the skill this mention loaded",
+# while a {type: skill, name, path} input item made the model quote "# Visualize".
+_catalog = [{"name": "deep-research-work:deep-research", "path": "/x/SKILL.md", "enabled": True},
+            {"name": "product-design:index", "path": "/pd/SKILL.md", "enabled": True},
+            {"name": "data-analytics:index", "path": "/da/SKILL.md", "enabled": True},
+            {"name": "imagegen", "path": "/sys/imagegen/SKILL.md", "enabled": True},
+            {"name": "review-agent", "path": "/sys/review/SKILL.md", "enabled": False}]
+_items = bridge.resolve_skills(["deep-research", "$imagegen", "product-design:index"], _catalog)
+assert _items == [{"type": "skill", "name": "deep-research", "path": "/x/SKILL.md"},
+                  {"type": "skill", "name": "imagegen", "path": "/sys/imagegen/SKILL.md"},
+                  {"type": "skill", "name": "index", "path": "/pd/SKILL.md"}], _items
+for bad, needle in (("index", "product-design:index"),          # ambiguous: name the candidates
+                    ("nope", "unknown skill"),                  # unknown: say so
+                    ("review-agent", "disabled")):              # disabled: cannot be injected
+    try:
+        bridge.resolve_skills([bad], _catalog)
+        raise AssertionError(f"{bad!r} must be refused")
+    except ValueError as e:
+        assert needle in str(e), (bad, str(e))
+assert bridge.resolve_skills([], _catalog) == [] and bridge.resolve_skills(None, _catalog) == []
+# and they lead the turn input, before the text and any images
+_in = bridge.build_input("go", [], "/tmp", skills=[{"type": "skill", "name": "x", "path": "/x/SKILL.md"}])
+assert _in[0]["type"] == "skill" and _in[1] == {"type": "text", "text": "go"}, _in
+_sub = next(t for t in bridge.TOOLS if t["name"] == "codex_submit")
+assert "skills" in _sub["inputSchema"]["properties"] and "skills" not in _sub["inputSchema"]["required"]
+# the catalog is fetched in the order that matters and cached per app-server generation
+_calls3 = []
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+def _cat_request(method, params, timeout=120):
+    _calls3.append(method)
+    return {"plugin/installed": {"marketplaces": []},
+            "skills/list": {"data": [{"cwd": "/tmp", "skills": _catalog}]}}[method]
+bridge.APP.request = _cat_request
+try:
+    bridge.APP.skill_catalog_cache = None
+    c1 = bridge.skill_catalog()
+    c2 = bridge.skill_catalog()
+    assert [s["name"] for s in c1] == [s["name"] for s in _catalog], c1
+    assert _calls3 == ["plugin/installed", "skills/list"], _calls3   # once, plugins first
+    assert c2 is c1, "second call must come from the cache"
+    bridge.APP.gen += 1                                           # a restarted child forgets
+    bridge.skill_catalog()
+    assert _calls3 == ["plugin/installed", "skills/list"] * 2, _calls3
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.skill_catalog_cache = None
+print("smoke: explicit skills resolve from the catalog and ride the turn input as structured items")
