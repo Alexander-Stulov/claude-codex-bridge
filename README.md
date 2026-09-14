@@ -175,7 +175,7 @@ reached the bridge (not only `codex exec`), run `python3 tests/context_live.py`.
 | `codex_check` | Preflight: codex present, version, models, threads in flight |
 | `codex_submit` | Start a thread, add a turn to one, or steer a running turn. Returns immediately |
 | `codex_poll` | State, progress snapshot, pending approvals, and the complete output once done |
-| `codex_approve` | Rule on an approval the thread is parked on |
+| `codex_approve` | Rule on an approval the thread is parked on — a command, file change, permission, or an MCP server's elicitation |
 | `codex_interrupt` | Stop the active turn; the thread stays usable |
 | `codex_compact` | Summarise the thread's history now, at a boundary you choose |
 
@@ -277,7 +277,11 @@ a private scratch workspace. Point concurrent write threads at different `cwd`
 
 `mode` is `write` (default) or `read`; both keep network access and the full tool
 surface. In-scope work never asks for approval — a request means codex hit the
-sandbox boundary or a suspicious-command rule.
+sandbox boundary or a suspicious-command rule. An MCP server codex is using can
+also park the thread on an *elicitation* — a permission prompt (a browser plugin
+asking to open a tab, say) or a short form — and it routes to the caller the same
+way: `allow` accepts, `deny` declines, `allow_always` has it remembered for the
+session when the request offers that, and `grant` carries a form's answers.
 
 Containment is codex's own sandbox, not the bridge's: Seatbelt on macOS, always on;
 codex's restricted-token sandbox on Windows, which is opt-in (see Prerequisites) —

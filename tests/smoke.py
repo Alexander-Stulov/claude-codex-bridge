@@ -322,3 +322,125 @@ assert bridge.refuse_reason(os.path.realpath(os.path.expanduser("~"))), "home mu
 assert bridge.refuse_reason(os.path.realpath(os.getcwd())) is None, "the repo itself must not be refused"
 assert bridge.SCRATCH_ROOT == os.path.normpath(bridge.SCRATCH_ROOT), bridge.SCRATCH_ROOT
 print("smoke: workspace refusal + scratch root ok")
+
+# --- 0.13.3: MCP elicitations are approvals, not auto-declines ------------------
+# An MCP server codex is using (a browser plugin, say) can park the thread on an
+# elicitation: a permission prompt or a short form. Since 0.4.0 the bridge answered
+# every one with decline whatever the caller decided, so codex_approve(allow) came
+# back {"sent": {"action": "decline"}} and the plugin reported the action blocked.
+_sent = {}
+bridge.APP.respond = lambda rid, result: _sent.update({"rid": rid, "result": result})
+bridge.APP.threads.clear(); bridge.APP.requests.clear()
+_st = bridge._new_thread_state("t20", "/tmp", "write", "astra-high")
+bridge.APP.threads["t20"] = _st
+
+
+def _elicit(rid, **extra):
+    params = {"threadId": "t20", "turnId": "turn-1", "serverName": "browser", "mode": "form",
+              "message": "Creating a new tab requires permission",
+              "requestedSchema": {"type": "object", "properties": {}}}
+    params.update(extra)
+    bridge.APP._on_server_request({"method": "mcpServer/elicitation/request", "id": rid,
+                                   "params": params})
+
+
+# the request surfaces with what is being asked, not just an id
+_elicit(20, _meta={"codex_approval_kind": "mcp_tool_call", "tool_name": "open_tab",
+                   "persist": ["session", "always"]})
+_view = bridge.codex_poll({"thread": "t20"})["requests"][0]
+assert _view["kind"] == "elicitation" and _view["server"] == "browser", _view
+assert _view["message"].startswith("Creating a new tab") and _view["mode"] == "form", _view
+assert _view["requested_schema"] == {"type": "object", "properties": {}}, _view
+assert _view["tool"] == "open_tab" and _view["persist_modes"] == ["session", "always"], _view
+
+# allow -> accept. codex treats a bare accept as content {}; it is sent explicitly so
+# the reply is a complete MCP ElicitResult however the MCP server reads it.
+_r = bridge.codex_approve({"request_id": "20", "decision": "allow"})
+assert _sent["rid"] == 20 and _sent["result"] == {"action": "accept", "content": {}}, _sent
+assert _r["sent"]["action"] == "accept" and _r["state"] == "running", _r
+
+# deny -> decline, and no content
+_elicit(21)
+bridge.codex_approve({"request_id": 21, "decision": "deny"})
+assert _sent["result"] == {"action": "decline"}, _sent
+
+# allow_always -> accept, remembered for the session, when the request offered that
+_elicit(22, _meta={"persist": ["session", "always"]})
+_r = bridge.codex_approve({"request_id": 22, "decision": "allow_always"})
+assert _sent["result"] == {"action": "accept", "content": {}, "_meta": {"persist": "session"}}, _sent
+assert "note" not in _r, _r
+# allow_class -> the durable variant codex calls "always"
+_elicit(23, _meta={"persist": ["session", "always"]})
+bridge.codex_approve({"request_id": 23, "decision": "allow_class"})
+assert _sent["result"]["_meta"] == {"persist": "always"}, _sent
+# a mode the request never offered is never sent: plain accept, and the caller is told
+_elicit(24)
+_r = bridge.codex_approve({"request_id": 24, "decision": "allow_always"})
+assert _sent["result"] == {"action": "accept", "content": {}}, _sent
+assert "persist" in _r.get("note", ""), _r
+# always asked for, only session offered -> session, and say so
+_elicit(25, _meta={"persist": "session"})
+_r = bridge.codex_approve({"request_id": 25, "decision": "allow_class"})
+assert _sent["result"]["_meta"] == {"persist": "session"} and "session" in _r.get("note", ""), _r
+
+# a form: grant carries the answers, checked against the schema's required fields
+# BEFORE anything is sent — the request must stay pending so a refused grant is retryable
+_form = {"type": "object", "required": ["project"],
+         "properties": {"project": {"type": "string", "title": "Project"},
+                        "notify": {"type": "boolean", "default": False}}}
+_elicit(26, message="Which project?", requestedSchema=_form)
+_sent.clear()
+try:
+    bridge.codex_approve({"request_id": 26, "decision": "allow"})
+    raise AssertionError("an accept without the required field must be refused")
+except ValueError as e:
+    assert "project" in str(e) and "grant" in str(e), e
+assert not _sent, "nothing may be sent for a refused grant"
+assert [p["request_id"] for p in bridge.pending_for("t20")] == [26], bridge.pending_for("t20")
+try:
+    bridge.codex_approve({"request_id": 26, "decision": "allow", "grant": ["not", "an", "object"]})
+    raise AssertionError("a non-object grant must be refused")
+except ValueError as e:
+    assert "object" in str(e), e
+_r = bridge.codex_approve({"request_id": 26, "decision": "allow",
+                           "grant": '{"project": "bridge", "notify": true}'})   # JSON string form
+assert _sent["result"] == {"action": "accept", "content": {"project": "bridge", "notify": True}}, _sent
+assert bridge.pending_for("t20") == [] and _st["state"] == "running", _st["state"]
+# deny needs no answers, however many fields the form requires
+_elicit(27, requestedSchema=_form)
+bridge.codex_approve({"request_id": 27, "decision": "deny"})
+assert _sent["result"] == {"action": "decline"}, _sent
+
+# a url-mode elicitation exposes the url it wants opened
+bridge.APP._on_server_request({"method": "mcpServer/elicitation/request", "id": 28, "params": {
+    "threadId": "t20", "serverName": "github", "mode": "url", "elicitationId": "e1",
+    "message": "Sign in to continue", "url": "https://example.test/auth"}})
+_view = bridge.codex_poll({"thread": "t20"})["requests"][0]
+assert _view["mode"] == "url" and _view["url"] == "https://example.test/auth", _view
+assert _view["requested_schema"] is None and _view["persist_modes"] == [], _view
+bridge.codex_approve({"request_id": 28, "decision": "allow"})
+assert _sent["result"] == {"action": "accept", "content": {}}, _sent
+
+# an elicitation for a thread the bridge does not track is still declined — in the
+# shape codex defines for THIS request type. {"decision": ...} is a command reply:
+# codex logged it as malformed before falling back to declining anyway.
+bridge.APP._on_server_request({"method": "mcpServer/elicitation/request", "id": 99, "params": {
+    "threadId": "ghost", "serverName": "x", "mode": "form", "message": "?",
+    "requestedSchema": {"type": "object", "properties": {}}}})
+assert _sent["rid"] == 99 and _sent["result"] == {"action": "decline"}, _sent
+# ... and a command for an untracked thread keeps its own shape
+bridge.APP._on_server_request({"method": "item/commandExecution/requestApproval", "id": 98,
+                               "params": {"threadId": "ghost", "command": "x"}})
+assert _sent["result"] == {"decision": "decline"}, _sent
+
+# the caller is told elicitations are approvable, at every decision point
+_approve = next(t for t in bridge.TOOLS if t["name"] == "codex_approve")
+assert "elicitation" in _approve["description"], _approve["description"]
+_props = _approve["inputSchema"]["properties"]
+assert "elicitation" in _props["grant"]["description"].lower(), _props["grant"]
+assert "elicitation" in _props["decision"]["description"].lower(), _props["decision"]
+_approvals = bridge.INSTRUCTIONS.split("APPROVALS:")[1].split("RESULTS:")[0]
+for phrase in ("elicitation", "grant", "persist_modes"):
+    assert phrase in _approvals, f"APPROVALS guidance lost {phrase!r}"
+bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: elicitations accept/decline as decided; forms carry grant; untracked threads still decline")

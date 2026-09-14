@@ -22,9 +22,10 @@ Exposed as six MCP tools:
 
 Posture: full tool surface, live web search, network in both modes. The sandbox
 envelope (mode + cwd) is what keeps work contained, so in-scope reads, writes and
-commands never generate approval traffic. Only sandbox escapes and execpolicy
-`prompt` rules escalate — and those route to the caller (approvalsReviewer=user),
-never to a silent auto-accept.
+commands never generate approval traffic. Only sandbox escapes, execpolicy
+`prompt` rules and MCP elicitations (a tool server asking for a permission or a
+form) escalate — and those route to the caller (approvalsReviewer=user), never to
+a silent auto-accept or auto-decline.
 
 Install (idempotent, re-run after updates):  python3 server.py --install
 Then open the built .mcpb once via the Desktop UI (the GUI step that registers the
@@ -82,11 +83,11 @@ JSON ANY TIME: pass output_schema on any turn - new or existing thread - and tha
 
 IMAGES: pass images on any turn - a list of file paths (absolute or relative to cwd) or http(s)/data URLs. Screenshots, mockups, diagrams, a rendering that looks wrong. A bad path is rejected before the turn starts.
 
-APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, codex hit the sandbox boundary or a suspicious-command rule; the request and the thread's declared scope come with it. Decide, then codex_approve(request_id, allow|allow_always|deny) and keep polling - allow_always covers that exact command again, and allow_class covers the whole command class when the request offers proposed_execpolicy_amendment (the one that stops a build loop re-prompting on every git add). allow_class writes an allow rule into codex's execpolicy: it outlives this session, and commands it matches run outside the sandbox from then on - grant it only for classes you would trust with the whole machine tomorrow.
+APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, codex hit the sandbox boundary or a suspicious-command rule; the request and the thread's declared scope come with it. Decide, then codex_approve(request_id, allow|allow_always|deny) and keep polling - allow_always covers that exact command again, and allow_class covers the whole command class when the request offers proposed_execpolicy_amendment (the one that stops a build loop re-prompting on every git add). allow_class writes an allow rule into codex's execpolicy: it outlives this session, and commands it matches run outside the sandbox from then on - grant it only for classes you would trust with the whole machine tomorrow. An MCP server codex is using can park the thread the same way, on an elicitation (kind: elicitation): a permission prompt from that server - a browser plugin asking to open a tab, say - or a short form. The request comes with server, message, requested_schema and persist_modes. codex_approve resolves it too: allow accepts, deny declines, allow_always accepts and has it remembered for the session (allow_class: permanently) when persist_modes offers that - a mode the request did not offer is never sent, and the answer says so. When requested_schema has fields, pass the answers in grant as an object keyed by field name; required fields are checked before anything is sent, so a refused grant can be retried.
 
 RESULTS: completed carries output (text, or your schema's JSON) plus bridge-stamped provenance - trust that over anything the model says about itself. Errors come back verbatim, including schema rejections."""
 
-SERVER_INFO = {"name": "codex", "version": "0.13.2"}
+SERVER_INFO = {"name": "codex", "version": "0.13.3"}
 
 # Friendly slug -> (wire model, reasoning effort). One caller-facing knob; the
 # app-server takes them as separate per-turn fields.
@@ -130,6 +131,16 @@ APPROVAL_KINDS = {
     "applyPatchApproval": "file_change",
     "mcpServer/elicitation/request": "elicitation",
 }
+
+# Keys codex puts in an elicitation's `_meta` when the elicitation is one of its own
+# MCP tool-call approvals (codex-rs/protocol/src/mcp_approval_meta.rs). `_meta` is
+# untyped on the wire, so the schema fixture cannot vouch for these names — they are
+# pinned here verbatim instead. A request lists the persistence it offers under
+# `persist` (one mode or a list); the reply names the one chosen.
+ELICITATION_PERSIST_KEY = "persist"
+ELICITATION_PERSIST_SESSION = "session"    # remembered for the rest of the session
+ELICITATION_PERSIST_ALWAYS = "always"      # written to codex's MCP policy: outlives the session
+ELICITATION_TOOL_NAME_KEY = "tool_name"
 
 # Storage belongs to codex (which persists threads) and to the caller (which has the
 # context window). The bridge accumulates nothing: progress is a SNAPSHOT of what is
@@ -581,12 +592,11 @@ class AppServer:
                 # Nothing we can surface it on, and an unanswered request parks the
                 # turn forever — decline rather than swallow it.
                 log(f"{method} for unknown thread {tid} — declining")
-                self.respond(rid, {"decision": "decline"} if kind != "permissions"
-                             else {"permissions": {}, "scope": "turn"})
+                self.respond(rid, decline_response(kind))
                 return
             # One canonical table. codex can hold SEVERAL approvals open on a thread,
             # so poll derives the list from here rather than keeping a second copy.
-            self.requests[rid] = {"kind": kind, "params": params, "thread": tid, "view": {
+            view = {
                 "request_id": rid,
                 "kind": kind,
                 "reason": params.get("reason"),
@@ -594,7 +604,10 @@ class AppServer:
                 "cwd": params.get("cwd"),
                 "permissions": params.get("permissions"),
                 "proposed_execpolicy_amendment": params.get("proposedExecpolicyAmendment"),
-            }}
+            }
+            if kind == "elicitation":
+                view.update(elicitation_view(params))     # what the MCP server is asking
+            self.requests[rid] = {"kind": kind, "params": params, "thread": tid, "view": view}
             st["state"] = "awaiting_approval"
             self._note(st, now="waiting for your approval")
 
@@ -1124,6 +1137,84 @@ def _peek_request(rid):
                      + (f" — pending: {pending}" if pending else " — nothing is awaiting approval"))
 
 
+def decline_response(kind):
+    """A refusal in the reply shape this request type defines. A permission request
+    wants an (empty) grant, an elicitation an MCP action, a command or patch a
+    decision. codex logs a reply in the wrong shape as malformed before it falls
+    back to declining, so the shape matters even when the answer is no."""
+    if kind == "permissions":
+        return {"permissions": {}, "scope": "turn"}
+    if kind == "elicitation":
+        return {"action": "decline"}
+    return {"decision": "decline"}
+
+
+def persist_modes(meta):
+    """The persistence an elicitation offers, as a list. codex attaches `persist` to
+    its own MCP tool-call approvals as one mode or a list of modes; only those may be
+    echoed back, so a mode the request never offered is never sent."""
+    offered = meta.get(ELICITATION_PERSIST_KEY) if isinstance(meta, dict) else None
+    if isinstance(offered, str):
+        return [offered]
+    if isinstance(offered, list):
+        return [m for m in offered if isinstance(m, str)]
+    return []
+
+
+def elicitation_view(params):
+    """What an MCP server is asking, so the caller can decide and, for a form, answer.
+    message, mode and requested_schema (or url) are the request itself; tool and
+    persist_modes come from the `_meta` codex attaches to its MCP tool-call approvals."""
+    meta = params.get("_meta")
+    meta = meta if isinstance(meta, dict) else {}
+    return {"server": params.get("serverName"),
+            "message": params.get("message"),
+            "mode": params.get("mode"),
+            "requested_schema": params.get("requestedSchema"),
+            "url": params.get("url"),
+            "tool": meta.get(ELICITATION_TOOL_NAME_KEY),
+            "persist_modes": persist_modes(meta)}
+
+
+def elicitation_response(params, decision, grant):
+    """The reply to an MCP elicitation for the caller's decision — codex's
+    McpServerElicitationRequestResponse: action accept | decline, content for a form,
+    _meta.persist when the grant is to be remembered. Returns (result, note).
+
+    content goes on every accept. codex itself reads a bare accept as content {}, but
+    the reply travels on to the MCP server, and a complete ElicitResult holds however
+    that server checks it. Required fields are checked here, before anything is sent:
+    the request is still pending at this point, so a refused grant stays retryable."""
+    if decision == "deny":
+        return {"action": "decline"}, None
+    content = json.loads(grant) if isinstance(grant, str) else grant
+    if content is None:
+        content = {}
+    if not isinstance(content, dict):
+        raise ValueError("grant for an elicitation must be a JSON object — the form's answers keyed by field name")
+    schema = params.get("requestedSchema")
+    if isinstance(schema, dict):
+        missing = [name for name in (schema.get("required") or []) if name not in content]
+        if missing:
+            raise ValueError(
+                f"elicitation from {params.get('serverName')} requires {missing} — pass them in grant, an "
+                f"object keyed by field name. Fields: {json.dumps(schema.get('properties') or {})[:600]}")
+    result = {"action": "accept", "content": content}
+    note = None
+    if decision in ("allow_always", "allow_class"):
+        offered = persist_modes(params.get("_meta"))
+        wanted = ELICITATION_PERSIST_SESSION if decision == "allow_always" else ELICITATION_PERSIST_ALWAYS
+        if wanted in offered:
+            result["_meta"] = {ELICITATION_PERSIST_KEY: wanted}
+        elif wanted == ELICITATION_PERSIST_ALWAYS and ELICITATION_PERSIST_SESSION in offered:
+            result["_meta"] = {ELICITATION_PERSIST_KEY: ELICITATION_PERSIST_SESSION}
+            note = "this elicitation does not offer 'always' persistence — accepted for the session instead"
+        else:
+            note = (f"this elicitation does not offer '{wanted}' persistence"
+                    + (f" (offered: {', '.join(offered)})" if offered else "") + " — accepted once")
+    return result, note
+
+
 def codex_approve(args):
     note = None
     rid = args.get("request_id")
@@ -1145,7 +1236,7 @@ def codex_approve(args):
         scope = args.get("scope") or ("session" if decision == "allow_always" else "turn")
         result = {"permissions": granted, "scope": scope}
     elif kind == "elicitation":
-        result = {"action": "decline"}
+        result, note = elicitation_response(req["params"], decision, args.get("grant"))
     else:  # command / file_change
         amendment = req["params"].get("proposedExecpolicyAmendment")
         if decision == "allow_class" and amendment:
@@ -1242,8 +1333,9 @@ TOOLS = [
         "name": "codex_poll",
         "description": ("Where the thread is right now: state (running | awaiting_approval | completed | "
                         "failed), an activity snapshot (what it is doing and how much it has done), the "
-                        "pending approval request(s) when it is waiting, and the complete output once it is "
-                        "done. Idempotent — nothing is consumed, and the answer arrives whole rather than in "
+                        "pending approval request(s) when it is waiting — a command, file change, permission "
+                        "or an MCP elicitation, each with what is being asked — and the complete output "
+                        "once it is done. Idempotent — nothing is consumed, and the answer arrives whole rather than in "
                         "pieces to reassemble. Poll every 20-30s and relay activity in plain language."),
         "inputSchema": {"type": "object", "properties": {"thread": {"type": "string"}},
                         "required": ["thread"], "additionalProperties": False},
@@ -1255,12 +1347,17 @@ TOOLS = [
                         "For permission requests, grant may narrow the request to a subset. When the "
                         "request carries proposed_execpolicy_amendment, allow_class grants that whole class as a "
                         "codex execpolicy allow rule — it persists beyond this session, and commands it "
-                        "matches run outside the sandbox from then on."),
+                        "matches run outside the sandbox from then on. An elicitation (kind: elicitation) "
+                        "is an MCP server codex is using asking the caller something — a permission prompt "
+                        "such as a browser plugin opening a tab, or a short form. It resolves the same way: "
+                        "allow accepts, deny declines, allow_always accepts and has it remembered for the "
+                        "session and allow_class permanently, each only when the request's persist_modes "
+                        "offers it. When its requested_schema has fields, grant carries the answers."),
         "inputSchema": {"type": "object", "properties": {
             "request_id": {"type": ["string", "integer"]},
             "decision": {"type": "string", "enum": ["allow", "allow_always", "allow_class", "deny"],
-                         "description": "allow = this once. allow_always = this exact command, rest of session. allow_class = the whole command class (uses the request's proposed_execpolicy_amendment, e.g. any git add) — the one that actually stops a loop re-prompting. It is written to codex's execpolicy as an allow rule: it outlives the session and its matches run outside the sandbox from then on. deny = refuse; codex adapts."},
-            "grant": {"type": ["object", "string"], "description": "Permission requests only: the subset to grant. Omit to grant what was asked."},
+                         "description": "allow = this once. allow_always = this exact command, rest of session. allow_class = the whole command class (uses the request's proposed_execpolicy_amendment, e.g. any git add) — the one that actually stops a loop re-prompting. It is written to codex's execpolicy as an allow rule: it outlives the session and its matches run outside the sandbox from then on. deny = refuse; codex adapts. For an elicitation: allow = accept once, allow_always = accept and remember for the session, allow_class = accept and remember permanently — each only when the request's persist_modes offers it, otherwise accepted once with a note — deny = decline."},
+            "grant": {"type": ["object", "string"], "description": "Permission requests: the subset to grant; omit to grant what was asked. Elicitations: the form's answers as an object keyed by field name (a JSON string is accepted too) — required when requested_schema lists required fields; omit for a plain yes/no elicitation."},
             "scope": {"type": "string", "enum": ["turn", "session"]}},
             "required": ["request_id", "decision"], "additionalProperties": False},
     },
