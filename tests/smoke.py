@@ -501,6 +501,19 @@ assert _srv["computer-use"]["tools"] == [] and "no tools" in _srv["computer-use"
 assert _srv["computer-use"]["source"] == "config.toml" and _srv["cua_repl"]["source"] == "plugin", _srv
 # a plugin with no skills still shows what it brings: the servers it provides
 assert _byid["chrome@openai-bundled"]["servers"] == ["cua_repl"], _byid["chrome@openai-bundled"]
+# the bundled surface plugins carry nothing of their own on the wire; the map says what serves them
+_plugins["marketplaces"][1]["plugins"].append(
+    {"name": "computer-use", "id": "computer-use@openai-bundled", "installed": True, "enabled": True,
+     "interface": {"displayName": "Computer Use", "shortDescription": "Control Mac apps from ChatGPT"}})
+_mcp2 = {"data": [dict(_mcp["data"][0]), dict(_mcp["data"][1], pluginId="unified-computer-use@openai-bundled"), _mcp["data"][2]]}
+_inv3 = bridge.capabilities_inventory(_plugins, _skills, _mcp2, _apps)
+_by3 = {p["id"]: p for p in _inv3["plugins"]}
+assert _by3["computer-use@openai-bundled"]["via"] == "cua_repl", _by3["computer-use@openai-bundled"]
+assert "via" not in _by3["deep-research-work@openai-curated-remote"], "a plugin with its own skills needs no via"
+_mcp3 = {"data": [_mcp["data"][0]]}                       # cua_repl absent: say so rather than claim it
+_by4 = {p["id"]: p for p in bridge.capabilities_inventory(_plugins, _skills, _mcp3, _apps)["plugins"]}
+assert _by4["computer-use@openai-bundled"]["via"] == "cua_repl (not running)", _by4["computer-use@openai-bundled"]
+_plugins["marketplaces"][1]["plugins"].pop()
 assert _byid["deep-research-work@openai-curated-remote"]["servers"] == [], _byid["deep-research-work@openai-curated-remote"]
 _apps_out = {a["name"]: a for a in inv["apps"]}
 assert _apps_out["Vercel"]["mention"] == "[$Vercel](app://connector_690a)", _apps_out["Vercel"]

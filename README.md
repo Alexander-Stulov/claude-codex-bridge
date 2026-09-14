@@ -335,10 +335,13 @@ Three are worth knowing:
   poll output. The bridge stores nothing. Its clarifying-question step (`request_user_input`) cannot reach the
   caller through the bridge yet, so tell it to state assumptions and proceed.
 - **Chrome** — the user's real Google Chrome through the ChatGPT Chrome extension:
-  logged-in sessions, open tabs, page content. Ask for the Chrome plugin by name
-  (the in-app Browser plugin is a separate, isolated browser). Each new site raises
-  an elicitation (`tool: access_browser_origin`, `persist_modes: ["always"]`):
-  `allow` grants once, `allow_class` grants that origin for good, `deny` blocks it.
+  logged-in sessions, open tabs, page content, and the easy way to work with web
+  pages — codex itself prefers it over Computer Use for anything in a browser. Ask
+  for the Chrome plugin by name (the in-app Browser plugin is a separate, isolated
+  browser). It runs through `cua_repl`, which the map shows as `via: cua_repl` on
+  the Chrome plugin. Each new site raises an elicitation (`tool:
+  access_browser_origin`, `persist_modes: ["always"]`): `allow` grants once,
+  `allow_class` grants that origin for good, `deny` blocks it.
 - **Computer Use** — native macOS app control through the Codex Computer Use app.
   It runs through the same `cua_repl` `js` tool as Chrome (plugin
   `unified-computer-use`): ask for Computer Use by name and codex opens the app

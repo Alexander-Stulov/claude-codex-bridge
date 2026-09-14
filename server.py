@@ -82,7 +82,7 @@ WHERE IT WORKS: cwd is the one location knob - any existing directory, normally 
 
 CAPABILITIES: codex arrives with plugins (skills), MCP servers and connected apps of its own, beyond files and shell. Before briefing work that might lean on one - research, documents, decks, spreadsheets, browsing, desktop control, an external service - call codex_capabilities: it lists every enabled plugin with the $skill mentions it contributes, every MCP server with its tools, and the connected apps; query narrows it. Invoke a skill by passing its name in codex_submit's skills (skills: ["deep-research-work:deep-research"], or just "deep-research" when that is unique) - the bridge injects the skill's instructions into the turn; a $mention typed into the prompt is not honoured through the app-server. An app is mentioned in the prompt as [$Name](app://id); MCP tools by name. Skills also fire implicitly when the brief matches their description.
 
-PLUGINS: three worth knowing. deep-research (skills: ["deep-research"]) is OpenAI Deep Research inside codex - multi-pass web research with cited sources, the capability Cowork and Code threads lack natively. Through codex it is metered against the account's Codex/Work usage allowance rather than the Chat deep-research task quota (OpenAI help center, September 2026), and it is the most expensive thing a thread does - one run reads well over a million tokens - so spend it on questions that merit it, and run it on sol-high/xhigh or astra, never a scout. Ask for the report in chat - say no document, deck or site - with a Sources section; codex_poll returns it whole. When it is worth keeping, and it usually is, add a turn on the same thread with cwd set to the project and ask codex to save the report to a markdown file (docs/research/<topic>.md, say) - it writes it verbatim with every source, in about a minute on terra-medium; or write a condensed version yourself from the poll output. The bridge stores nothing. Its clarifying questions cannot reach you through this bridge yet, so tell it to state assumptions and proceed. Chrome is the user's real Google Chrome through the ChatGPT Chrome extension - logged-in sessions, open tabs: ask for the Chrome plugin by name; each new site raises an elicitation (tool access_browser_origin) that allow grants once and allow_class grants for good. Computer Use is native macOS app control through the Codex Computer Use app, and it runs through the same cua_repl js tool as Chrome (plugin unified-computer-use): ask for Computer Use by name and codex opens the app with cua.getApp; the first use of each app raises an elicitation (tool get_app_state, persist_modes session and always) that allow grants once, allow_always for the session, allow_class for good. A computer-use MCP server listed with no tools is a legacy config.toml entry, not the capability - ignore it. Documents, presentations, spreadsheets, pdf, visualize, sites and the rest appear in codex_capabilities with their mentions.
+PLUGINS: three worth knowing. deep-research (skills: ["deep-research"]) is OpenAI Deep Research inside codex - multi-pass web research with cited sources, the capability Cowork and Code threads lack natively. Through codex it is metered against the account's Codex/Work usage allowance rather than the Chat deep-research task quota (OpenAI help center, September 2026), and it is the most expensive thing a thread does - one run reads well over a million tokens - so spend it on questions that merit it, and run it on sol-high/xhigh or astra, never a scout. Ask for the report in chat - say no document, deck or site - with a Sources section; codex_poll returns it whole. When it is worth keeping, and it usually is, add a turn on the same thread with cwd set to the project and ask codex to save the report to a markdown file (docs/research/<topic>.md, say) - it writes it verbatim with every source, in about a minute on terra-medium; or write a condensed version yourself from the poll output. The bridge stores nothing. Its clarifying questions cannot reach you through this bridge yet, so tell it to state assumptions and proceed. Chrome is the user's real Google Chrome through the ChatGPT Chrome extension - logged-in sessions, open tabs, page content - and the easy way to work with web pages: codex itself prefers it over Computer Use for anything in a browser. Ask for the Chrome plugin by name; it runs through cua_repl (the map shows via: cua_repl), and each new site raises an elicitation (tool access_browser_origin) that allow grants once and allow_class grants for good. Computer Use is native macOS app control through the Codex Computer Use app, and it runs through the same cua_repl js tool as Chrome (plugin unified-computer-use): ask for Computer Use by name and codex opens the app with cua.getApp; the first use of each app raises an elicitation (tool get_app_state, persist_modes session and always) that allow grants once, allow_always for the session, allow_class for good. A computer-use MCP server listed with no tools is a legacy config.toml entry, not the capability - ignore it. Documents, presentations, spreadsheets, pdf, visualize, sites and the rest appear in codex_capabilities with their mentions.
 
 NETWORK: codex has network access in both modes, always - web search, http, package installs, git remotes; there is nothing to enable or approve. Containment is the sandbox (writes confined to cwd), not the network.
 
@@ -954,7 +954,15 @@ HOW_TO_USE = ("pass a skill's name in codex_submit's skills (deep-research-work:
               "deep-research when that is unique) and the bridge injects its instructions into the turn — a "
               "$mention typed into the prompt is not honoured through the app-server. An app is mentioned in the "
               "prompt as [$Name](app://id); MCP tools by name. Skills also fire implicitly when the brief matches "
-              "their description.")
+              "their description. Chrome (the ChatGPT Chrome extension), the in-app Browser and Computer Use are "
+              "surfaces of one server, cua_repl (plugin unified-computer-use): ask for them by name in the prompt; "
+              "codex prefers Chrome over Computer Use for anything on a web page.")
+
+# OpenAI's bundled surface plugins carry no skill and no server of their own: their capability is
+# served by the unified-computer-use plugin's cua_repl server (its js tool's browser and app
+# surfaces). Nothing on the wire says so, and without it the map shows them empty.
+SERVED_BY = {"chrome@openai-bundled": "cua_repl", "browser@openai-bundled": "cua_repl",
+             "computer-use@openai-bundled": "cua_repl"}
 
 
 def skill_catalog():
@@ -1055,8 +1063,12 @@ def capabilities_inventory(plugins_res, skills_res, mcp_res, apps_res, query=Non
                         "tools": sorted(tools), "_tools": tools})
     # A plugin's MCP servers, so a plugin with no skills (Computer Use, Chrome) still shows
     # what it brings — the capability lives in the server's tools, not in a skill.
+    running = {srv["name"] for srv in servers if srv["tools"]}
     for p in plugins:
         p["servers"] = [srv["name"] for srv in servers if srv["plugin"] == p["id"]]
+        if not p["skills"] and not p["servers"] and p["id"] in SERVED_BY:
+            host = SERVED_BY[p["id"]]
+            p["via"] = host if host in running else f"{host} (not running)"
     for a in (apps_res or {}).get("apps") or []:
         apps.append({"name": a.get("runtimeName") or a.get("id"),
                      "mention": f"[${a.get('runtimeName') or a.get('id')}](app://{a.get('id')})",
