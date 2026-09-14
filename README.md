@@ -340,12 +340,13 @@ Three are worth knowing:
   an elicitation (`tool: access_browser_origin`, `persist_modes: ["always"]`):
   `allow` grants once, `allow_class` grants that origin for good, `deny` blocks it.
 - **Computer Use** — native macOS app control through the Codex Computer Use app.
-  It works only when the `computer-use` MCP server is enabled in codex —
-  `enabled = true` under `[mcp_servers.computer-use]` in `~/.codex/config.toml`
-  (it ships disabled; `codex mcp list` shows the state) — and the app holds
-  Accessibility and Screen Recording permissions. Then `codex_capabilities`
-  lists it with its tools, and it asks for consent the same way Chrome does; until
-  then the map shows it with no tools and a thread reports it unavailable.
+  It runs through the same `cua_repl` `js` tool as Chrome (plugin
+  `unified-computer-use`): ask for Computer Use by name and codex opens the app
+  with `cua.getApp`. The first use of each app raises an elicitation (`tool:
+  get_app_state`, `persist_modes: ["session", "always"]`): `allow` grants once,
+  `allow_always` for the session, `allow_class` for good. A `computer-use` MCP
+  server shown with no tools is a legacy `config.toml` entry, not the
+  capability; the map marks such entries `source: config.toml`.
 
 Documents, presentations, spreadsheets, PDF, visualize, sites and the rest appear
 in the map with their mentions.

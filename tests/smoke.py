@@ -498,6 +498,10 @@ assert _srv["MCP_DOCKER"]["tools"] == ["mcp-add", "mcp-find"], _srv["MCP_DOCKER"
 assert _srv["cua_repl"]["plugin"] == "chrome@openai-bundled", _srv["cua_repl"]
 # a server that lists no tools cannot be used; the map says so instead of showing an empty list
 assert _srv["computer-use"]["tools"] == [] and "no tools" in _srv["computer-use"]["status"], _srv["computer-use"]
+assert _srv["computer-use"]["source"] == "config.toml" and _srv["cua_repl"]["source"] == "plugin", _srv
+# a plugin with no skills still shows what it brings: the servers it provides
+assert _byid["chrome@openai-bundled"]["servers"] == ["cua_repl"], _byid["chrome@openai-bundled"]
+assert _byid["deep-research-work@openai-curated-remote"]["servers"] == [], _byid["deep-research-work@openai-curated-remote"]
 _apps_out = {a["name"]: a for a in inv["apps"]}
 assert _apps_out["Vercel"]["mention"] == "[$Vercel](app://connector_690a)", _apps_out["Vercel"]
 assert _apps_out["Vercel"]["enabled"] is True and _apps_out["Hotline"]["enabled"] is False, _apps_out
