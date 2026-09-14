@@ -11,8 +11,9 @@ wire format). Sessions are real codex threads: they hold context between calls,
 accept follow-up turns, can be steered mid-turn, and survive a bridge restart via
 thread/resume.
 
-Exposed as six MCP tools:
+Exposed as seven MCP tools:
   codex_check      readiness, models, live threads
+  codex_capabilities  what codex can do here: plugins and their $skills, MCP servers, apps
   codex_submit     new thread or next turn (or steer a running one); per-turn model,
                    mode, cwd and JSON output schema
   codex_poll       snapshot: state, what it is doing now, pending approvals, final output
@@ -79,6 +80,12 @@ MODELS by task weight: luna-medium/high = scouting and mechanical extraction - s
 
 WHERE IT WORKS: cwd is the one location knob - any existing directory, normally the folder the calling session is already in. Nothing to register: a new project or a worktree parked anywhere works immediately. Reads still see the surrounding repo; writes are confined to cwd, so point it at the repo for repo-wide work or at a subdirectory to contain the blast radius. Omit it for work that needs no repo (research, reasoning, throwaway code) and the thread gets a private scratch workspace - the result says workspace: scratch. mode is write (default) or read. Point concurrent write threads at different cwd (e.g. separate worktrees) and they cannot collide. On Windows the bridge dispatches only while codex's own sandbox is enabled; codex_check reports windows_sandbox and the fix when it is not.
 
+CAPABILITIES: codex arrives with plugins (skills), MCP servers and connected apps of its own, beyond files and shell. Before briefing work that might lean on one - research, documents, decks, spreadsheets, browsing, desktop control, an external service - call codex_capabilities: it lists every enabled plugin with the $skill mentions it contributes, every MCP server with its tools, and the connected apps; query narrows it. Invoke a skill by writing its mention in the prompt ($deep-research, $documents, $presentations); an app as [$Name](app://id); MCP tools by name. Skills also fire implicitly when the brief matches their description.
+
+PLUGINS: three worth knowing. $deep-research is OpenAI Deep Research inside codex - multi-pass web research with cited sources, the capability Cowork and Code threads lack natively. Through codex it is metered against the account's Codex/Work usage allowance rather than the Chat deep-research task quota (OpenAI help center, September 2026), and it is the most expensive thing a thread does - one run reads well over a million tokens - so spend it on questions that merit it, and run it on sol-high/xhigh or astra, never a scout. Ask for the report in chat - say no document, deck or site - with a Sources section; codex_poll returns it whole. When it is worth keeping, and it usually is, write the cleaned report yourself to a markdown file (docs/research/<topic>.md, say) with its sources; the bridge stores nothing. Its clarifying questions cannot reach you through this bridge yet, so tell it to state assumptions and proceed. Chrome is the user's real Google Chrome through the ChatGPT Chrome extension - logged-in sessions, open tabs: ask for the Chrome plugin by name; each new site raises an elicitation (tool access_browser_origin) that allow grants once and allow_class grants for good. Computer Use is native macOS app control through the Codex Computer Use app; it works only when codex_capabilities lists the computer-use MCP server with tools - which needs enabled = true under [mcp_servers.computer-use] in ~/.codex/config.toml (it ships disabled) and the app granted Accessibility and Screen Recording - and it asks the same way. Documents, presentations, spreadsheets, pdf, visualize, sites and the rest appear in codex_capabilities with their mentions.
+
+NETWORK: codex has network access in both modes, always - web search, http, package installs, git remotes; there is nothing to enable or approve. Containment is the sandbox (writes confined to cwd), not the network.
+
 JSON ANY TIME: pass output_schema on any turn - new or existing thread - and that turn's final message is constrained to it. Omit it for prose.
 
 IMAGES: pass images on any turn - a list of file paths (absolute or relative to cwd) or http(s)/data URLs. Screenshots, mockups, diagrams, a rendering that looks wrong. A bad path is rejected before the turn starts.
@@ -87,7 +94,7 @@ APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, 
 
 RESULTS: completed carries output (text, or your schema's JSON) plus bridge-stamped provenance - trust that over anything the model says about itself. Errors come back verbatim, including schema rejections."""
 
-SERVER_INFO = {"name": "codex", "version": "0.13.3"}
+SERVER_INFO = {"name": "codex", "version": "0.14.0"}
 
 # Friendly slug -> (wire model, reasoning effort). One caller-facing knob; the
 # app-server takes them as separate per-turn fields.
@@ -940,6 +947,117 @@ def codex_check(_args):
     return info
 
 
+NETWORK_NOTE = ("always on in both modes — web search, http, package installs, git remotes; nothing to "
+                "enable or approve. Containment is the sandbox (writes confined to cwd), not the network.")
+HOW_TO_USE = ("write a skill's mention in the prompt ($deep-research, $documents); an app as [$Name](app://id); "
+              "MCP tools by name. Skills also fire implicitly when the brief matches their description.")
+
+
+def skill_mention(name):
+    """A plugin's skill is `plugin:skill` on the wire; the model invokes it by the skill's own name."""
+    return "$" + str(name or "").split(":")[-1]
+
+
+def _one_line(value, limit):
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def capabilities_inventory(plugins_res, skills_res, mcp_res, apps_res, query=None, errors=None):
+    """Shape four app-server answers into one map of what codex can do here.
+
+    A map, not a manual: the default view carries names, mentions and one-line summaries
+    only, so it stays a few KB however many skills are installed; a query brings the
+    matching descriptions with it. A source that failed is reported under `errors` and
+    the rest of the map still comes back — a missing app list is no reason to hide the
+    plugins."""
+    plugins, skills, servers, apps, seen = [], [], [], [], set()
+    for market in (plugins_res or {}).get("marketplaces") or []:
+        for p in market.get("plugins") or []:
+            iface = p.get("interface") or {}
+            plugins.append({"id": p.get("id") or f"{p.get('name')}@{market.get('name')}",
+                            "name": iface.get("displayName") or p.get("name"),
+                            "summary": _one_line(iface.get("shortDescription") or iface.get("longDescription"), 120),
+                            "enabled": bool(p.get("enabled")), "skills": []})
+    by_id = {p["id"]: p for p in plugins}
+    for entry in (skills_res or {}).get("data") or []:
+        for s in entry.get("skills") or []:
+            if s.get("enabled") is False or s.get("name") in seen:
+                continue                      # a disabled skill cannot be invoked; one cwd's copy is enough
+            seen.add(s.get("name"))
+            rec = {"mention": skill_mention(s.get("name")), "name": s.get("name"), "plugin": s.get("pluginId"),
+                   "scope": s.get("scope"), "description": s.get("description") or ""}
+            skills.append(rec)
+            if rec["plugin"] in by_id:
+                by_id[rec["plugin"]]["skills"].append(rec["mention"])
+    for srv in (mcp_res or {}).get("data") or []:
+        tools = srv.get("tools") or {}
+        if not isinstance(tools, dict):
+            tools = {t.get("name"): t for t in tools if isinstance(t, dict)}
+        status = srv.get("runtimeStatus")
+        if not tools:
+            status = status or "no tools listed — disabled in codex config, or the server did not start"
+        servers.append({"name": srv.get("name"), "status": status, "plugin": srv.get("pluginId"),
+                        "tools": sorted(tools), "_tools": tools})
+    for a in (apps_res or {}).get("apps") or []:
+        apps.append({"name": a.get("runtimeName") or a.get("id"),
+                     "mention": f"[${a.get('runtimeName') or a.get('id')}](app://{a.get('id')})",
+                     "enabled": bool(a.get("enabled")), "callable": bool(a.get("callable"))})
+
+    out = {"network": NETWORK_NOTE, "how_to_use": HOW_TO_USE}
+    if query:
+        q = str(query).lower()
+        matches = []
+        for p in plugins:
+            if q in f"{p['name']} {p['summary']} {p['id']}".lower():
+                matches.append({"kind": "plugin", **p})
+        for s in skills:
+            if q in f"{s['name']} {s['description']}".lower():
+                matches.append({"kind": "skill", "mention": s["mention"], "name": s["name"], "plugin": s["plugin"],
+                                "description": _one_line(s["description"], 300)})
+        for srv in servers:
+            for tname, t in srv["_tools"].items():
+                desc = (t.get("description") if isinstance(t, dict) else "") or ""
+                if q in f"{tname} {desc}".lower():
+                    matches.append({"kind": "tool", "name": tname, "server": srv["name"], "description": _one_line(desc, 300)})
+        for a in apps:
+            if q in a["name"].lower():
+                matches.append({"kind": "app", **a})
+        out.update({"query": query, "matches": matches})
+    else:
+        out.update({"plugins": plugins,
+                    "system_skills": [s["mention"] for s in skills if not s["plugin"]],
+                    "mcp_servers": [{k: v for k, v in srv.items() if k != "_tools"} for srv in servers],
+                    "apps": apps,
+                    "counts": {"plugins": len(plugins), "skills": len(skills),
+                               "mcp_servers": len(servers), "apps": len(apps)}})
+    if errors:
+        out["errors"] = errors
+    return out
+
+
+def codex_capabilities(args):
+    """What codex can do on this machine, asked of the app-server itself rather than
+    guessed from disk: codex owns the discovery rules (marketplaces, config, caches)."""
+    APP.ensure()
+    results, errors = {}, {}
+    # plugin/installed goes FIRST. skills/list only lists a remote-marketplace plugin's
+    # skills once that app-server process has loaded the remote catalog, which
+    # plugin/installed does — asked the other way round, Deep Research is invisible.
+    for key, method, params in (
+            ("plugins", "plugin/installed", {"cwds": None, "installSuggestionPluginNames": None}),
+            ("skills", "skills/list", {"cwds": [], "forceReload": True}),
+            ("mcp", "mcpServerStatus/list", {}),
+            ("apps", "app/installed", {})):
+        try:
+            results[key] = APP.request(method, params, timeout=60)
+        except CodexError as e:
+            results[key] = None
+            errors[key] = f"{method}: {json.dumps(e.payload)[:200]}"
+    return capabilities_inventory(results["plugins"], results["skills"], results["mcp"], results["apps"],
+                                  query=args.get("query"), errors=errors or None)
+
+
 def codex_submit(args):
     prompt = args.get("prompt")
     if not prompt or not str(prompt).strip():
@@ -1313,17 +1431,30 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "codex_capabilities",
+        "description": ("What codex can do on this machine beyond files and shell: every enabled plugin with the "
+                        "$skill mentions it contributes, every MCP server with its tools, and the connected apps — "
+                        "plus the standing facts (network always on). Call it before briefing work that might lean on "
+                        "one: research ($deep-research), documents, decks, spreadsheets, browsing, desktop control, an "
+                        "external service. Spawns the app-server if it is idle. query narrows the answer to matching "
+                        "skills, tools, plugins and apps and adds their descriptions."),
+        "inputSchema": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Substring to search across skill, tool, plugin and app names and descriptions — research, spreadsheet, chrome. Omit for the whole map."}},
+            "additionalProperties": False},
+    },
+    {
         "name": "codex_submit",
         "description": ("Start a codex thread or add a turn to one. No thread → new session; a thread that is idle → "
                         "next turn with full prior context; a thread mid-turn → the input steers the running turn. "
-                        "Returns instantly: poll with codex_poll. Pass output_schema on any turn to get JSON back."),
+                        "Returns instantly: poll with codex_poll. Pass output_schema on any turn to get JSON back. Name a plugin skill "
+                        "in the prompt as $skill ($deep-research) — codex_capabilities lists them."),
         "inputSchema": {"type": "object", "properties": {
             "prompt": {"type": "string", "description": "The instruction. For a new thread this is all codex sees — make it self-contained. Ask for the answer as output rather than a report file, and if it covers many items bound it here — cap, index, and what to do when they do not fit. Nothing else will."},
             "model": {"type": "string", "enum": sorted(MODELS),
                       "description": "luna=scouting, then hand findings to the model that does the work; terra=everyday work; sol=complex implementation; astra=GPT-6 heavyweight for hard, long-context or agentic work and independent review. Effort: high/xhigh are the working range; max rarely improves on xhigh; ultra = xhigh plus proactive sub-agent delegation, for work that splits into substantial independent parts (max for small or tightly-coupled work)."},
             "thread": {"type": "string", "description": "Continue this thread. Omit to start a new one."},
             "cwd": {"type": "string", "description": "Absolute path to the directory to work in — normally the folder this session is already in. Any existing directory works; nothing needs registering. Reads still see the surrounding repo; writes are confined here, so aim it at the narrowest directory the writes should reach. Omit for work that needs no repo (research, reasoning, throwaway code): the thread gets a private scratch workspace. Point concurrent write threads at different cwd (e.g. worktrees) and they cannot collide."},
-            "mode": {"type": "string", "enum": list(MODES), "description": "write (default) or read. Both keep network and the full tool surface."},
+            "mode": {"type": "string", "enum": list(MODES), "description": "write (default) or read. Both keep network access (always on) and the full tool surface."},
             "output_schema": {"type": ["object", "string"], "description": "JSON Schema constraining this turn's final message. Omit for prose."},
             "images": {"type": "array", "items": {"type": "string"},
                        "description": "Images to send with this turn — screenshots, mockups, diagrams, a failing UI. Each entry is a file path (absolute, or relative to cwd) or an http(s)/data URL. Works on any turn, new thread or follow-up."}},
@@ -1379,7 +1510,8 @@ TOOLS = [
     },
 ]
 
-HANDLERS = {"codex_check": codex_check, "codex_submit": codex_submit, "codex_poll": codex_poll,
+HANDLERS = {"codex_check": codex_check, "codex_capabilities": codex_capabilities,
+            "codex_submit": codex_submit, "codex_poll": codex_poll,
             "codex_approve": codex_approve, "codex_interrupt": codex_interrupt,
             "codex_compact": codex_compact}
 

@@ -38,7 +38,7 @@ assert manifest["version"] == version, (manifest["version"], version)
 
 tools = {t["name"] for t in out[2]["result"]["tools"]}
 assert tools == {"codex_check", "codex_submit", "codex_poll", "codex_approve", "codex_interrupt",
-                 "codex_compact"}, tools
+                 "codex_compact", "codex_capabilities"}, tools
 # The manifest's tool list is what the install preview shows and what a reviewer reads:
 # it must name exactly the tools the server registers, in the same order, or a new
 # tool ships invisible to anyone deciding whether to install.
@@ -444,3 +444,121 @@ for phrase in ("elicitation", "grant", "persist_modes"):
     assert phrase in _approvals, f"APPROVALS guidance lost {phrase!r}"
 bridge.APP.threads.clear(); bridge.APP.requests.clear()
 print("smoke: elicitations accept/decline as decided; forms carry grant; untracked threads still decline")
+
+# --- 0.14.0: codex_capabilities — what codex can do here, before a brief is written -----
+# The inventory is shaped from four app-server answers. The payloads below mirror the real
+# shapes observed on codex-cli 0.153.4 (plugin/installed, skills/list, mcpServerStatus/list,
+# app/installed), trimmed to what the bridge reads.
+_plugins = {"marketplaces": [
+    {"name": "openai-curated-remote", "plugins": [
+        {"name": "deep-research-work", "id": "deep-research-work@openai-curated-remote",
+         "installed": True, "enabled": True,
+         "interface": {"displayName": "Deep Research", "shortDescription": "Deep research",
+                       "longDescription": "Investigate complex questions with cited synthesis."}},
+        {"name": "vercel", "id": "vercel@openai-curated-remote", "installed": True, "enabled": False,
+         "interface": {"displayName": "Vercel", "shortDescription": "Build and deploy web apps"}}]},
+    {"name": "openai-bundled", "plugins": [
+        {"name": "chrome", "id": "chrome@openai-bundled", "installed": True, "enabled": True,
+         "interface": {"displayName": "Chrome", "shortDescription": "Control Chrome with ChatGPT"}}]}],
+    "marketplaceLoadErrors": []}
+_skills = {"data": [{"cwd": "/tmp", "skills": [
+    {"name": "deep-research-work:deep-research", "enabled": True, "scope": "user",
+     "pluginId": "deep-research-work@openai-curated-remote", "path": "/x/SKILL.md",
+     "description": "Use only when the user asks for deep research. Produce a comprehensive, cited artifact."},
+    {"name": "vercel:vercel-queues", "enabled": True, "scope": "user",
+     "pluginId": "vercel@openai-curated-remote", "path": "/y/SKILL.md", "description": "Vercel Queues guidance"},
+    {"name": "imagegen", "enabled": True, "scope": "system", "pluginId": None, "path": "/z/SKILL.md",
+     "description": "Generate or edit raster images"},
+    {"name": "review-agent", "enabled": False, "scope": "system", "pluginId": None, "path": "/w/SKILL.md",
+     "description": "Perform a read-only review"}]}]}
+_mcp = {"data": [
+    {"name": "MCP_DOCKER", "runtimeStatus": None, "pluginId": None,
+     "serverInfo": {"name": "Docker AI MCP Gateway", "version": "2.0.1"},
+     "tools": {"mcp-find": {"name": "mcp-find", "description": "Find MCP servers in the current catalog"},
+               "mcp-add": {"name": "mcp-add", "description": "Add a new MCP server to the session"}}},
+    {"name": "cua_repl", "runtimeStatus": None, "pluginId": "chrome@openai-bundled", "serverInfo": None,
+     "tools": {"js": {"name": "js", "description": "Run JavaScript against the browser"}}},
+    {"name": "computer-use", "runtimeStatus": None, "pluginId": None, "serverInfo": None, "tools": {}}]}
+_apps = {"apps": [{"id": "connector_690a", "runtimeName": "Vercel", "enabled": True, "callable": True},
+                  {"id": "connector_openai_hotline", "runtimeName": "Hotline", "enabled": False, "callable": False}]}
+
+inv = bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps)
+assert "both modes" in inv["network"], inv["network"]
+assert "$" in inv["how_to_use"], inv["how_to_use"]
+_byid = {p["id"]: p for p in inv["plugins"]}
+_dr = _byid["deep-research-work@openai-curated-remote"]
+assert _dr["name"] == "Deep Research" and _dr["enabled"] is True, _dr
+assert _dr["skills"] == ["$deep-research"], "a namespaced skill is mentioned by its own name: %r" % _dr
+assert _byid["vercel@openai-curated-remote"]["enabled"] is False, "a disabled plugin is still listed, flagged"
+assert _byid["vercel@openai-curated-remote"]["skills"] == ["$vercel-queues"], _byid["vercel@openai-curated-remote"]
+assert _byid["chrome@openai-bundled"]["skills"] == [], _byid["chrome@openai-bundled"]
+assert inv["system_skills"] == ["$imagegen"], "system skills listed; a disabled skill is not offered: %r" % inv["system_skills"]
+_srv = {s["name"]: s for s in inv["mcp_servers"]}
+assert _srv["MCP_DOCKER"]["tools"] == ["mcp-add", "mcp-find"], _srv["MCP_DOCKER"]
+assert _srv["cua_repl"]["plugin"] == "chrome@openai-bundled", _srv["cua_repl"]
+# a server that lists no tools cannot be used; the map says so instead of showing an empty list
+assert _srv["computer-use"]["tools"] == [] and "no tools" in _srv["computer-use"]["status"], _srv["computer-use"]
+_apps_out = {a["name"]: a for a in inv["apps"]}
+assert _apps_out["Vercel"]["mention"] == "[$Vercel](app://connector_690a)", _apps_out["Vercel"]
+assert _apps_out["Vercel"]["enabled"] is True and _apps_out["Hotline"]["enabled"] is False, _apps_out
+assert inv["counts"] == {"plugins": 3, "skills": 3, "mcp_servers": 3, "apps": 2}, inv["counts"]
+assert "errors" not in inv, inv
+# descriptions stay out of the default view — it is a map, not a manual
+assert "description" not in json.dumps(inv["plugins"]) and "Generate or edit" not in json.dumps(inv), inv
+
+# a query narrows to matches and brings the descriptions with them
+q = bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps, query="ReSearch")
+assert "plugins" not in q and q["query"] == "ReSearch", q
+_kinds = {(m["kind"], m.get("mention") or m.get("name")) for m in q["matches"]}
+assert ("skill", "$deep-research") in _kinds and ("plugin", "Deep Research") in _kinds, _kinds
+assert not any(m["kind"] == "tool" for m in q["matches"]), q["matches"]
+_skill_match = next(m for m in q["matches"] if m["kind"] == "skill")
+assert _skill_match["name"] == "deep-research-work:deep-research" and "cited artifact" in _skill_match["description"], _skill_match
+q2 = bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps, query="find")
+_tool = next(m for m in q2["matches"] if m["kind"] == "tool")
+assert _tool["name"] == "mcp-find" and _tool["server"] == "MCP_DOCKER" and "catalog" in _tool["description"], _tool
+assert bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps, query="zzz-nothing")["matches"] == []
+
+# a failed source is reported, never fatal: the rest of the map still comes back
+inv2 = bridge.capabilities_inventory(_plugins, _skills, _mcp, None, errors={"apps": "app/installed failed"})
+assert inv2["apps"] == [] and inv2["errors"] == {"apps": "app/installed failed"}, inv2
+assert inv2["counts"]["plugins"] == 3, inv2["counts"]
+
+# the tool asks the app-server in the ORDER that matters: remote-marketplace plugins only
+# show their skills in skills/list once plugin/installed has loaded them in that process
+_calls = []
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: _calls.append("ensure")
+def _fake_request(method, params, timeout=120):
+    _calls.append(method)
+    return {"plugin/installed": _plugins, "skills/list": _skills,
+            "mcpServerStatus/list": _mcp, "app/installed": _apps}[method]
+bridge.APP.request = _fake_request
+try:
+    out = bridge.codex_capabilities({})
+    assert _calls[0] == "ensure" and _calls.index("plugin/installed") < _calls.index("skills/list"), _calls
+    assert out["counts"]["skills"] == 3, out["counts"]
+    _calls.clear()
+    def _failing_request(method, params, timeout=120):
+        _calls.append(method)
+        if method == "app/installed":
+            raise bridge.CodexError({"message": "unsupported"})
+        return _fake_request(method, params)
+    bridge.APP.request = _failing_request
+    out = bridge.codex_capabilities({"query": "find"})
+    assert "apps" in out["errors"] and out["matches"], out
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+
+_cap = next(t for t in bridge.TOOLS if t["name"] == "codex_capabilities")
+assert _cap["inputSchema"].get("required", []) == [], _cap["inputSchema"]
+assert "query" in _cap["inputSchema"]["properties"], _cap["inputSchema"]
+# the caller is told to look before briefing, what the important plugins are, and that the
+# network is always there — at the decision points, not just in the README
+for marker in ("CAPABILITIES:", "PLUGINS:", "NETWORK:"):
+    assert marker in bridge.INSTRUCTIONS, f"instructions missing {marker!r}"
+_plug = bridge.INSTRUCTIONS.split("PLUGINS:")[1].split("NETWORK:")[0]
+for phrase in ("$deep-research", "codex_capabilities", "Computer Use", "Chrome", "sol", "quota", "markdown"):
+    assert phrase in _plug, f"PLUGINS guidance lost {phrase!r}"
+assert "both modes" in bridge.INSTRUCTIONS.split("NETWORK:")[1].split("\n")[0]
+print("smoke: capabilities inventory shaped, queried, resilient; app-server asked in the right order")

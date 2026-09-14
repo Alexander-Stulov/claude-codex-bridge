@@ -173,6 +173,7 @@ reached the bridge (not only `codex exec`), run `python3 tests/context_live.py`.
 | Tool | Purpose |
 |---|---|
 | `codex_check` | Preflight: codex present, version, models, threads in flight |
+| `codex_capabilities` | What codex can do here: plugins and their `$skill` mentions, MCP servers and tools, connected apps |
 | `codex_submit` | Start a thread, add a turn to one, or steer a running turn. Returns immediately |
 | `codex_poll` | State, progress snapshot, pending approvals, and the complete output once done |
 | `codex_approve` | Rule on an approval the thread is parked on — a command, file change, permission, or an MCP server's elicitation |
@@ -293,6 +294,58 @@ denial — an exception codex's own test suite documents. Approvals are the
 deliberate exception to all of it: a command you approve, or one matched by an
 execpolicy allow rule — including every class `allow_class` grants — runs outside
 the sandbox.
+
+## Plugins, skills and apps
+
+codex brings its own plugins, MCP servers and connected ChatGPT apps, and the
+bridge exposes them as they are. `codex_capabilities` asks the app-server what is
+installed and returns one map: every enabled plugin with the `$skill` mentions it
+contributes, every MCP server with its tools, the connected apps, and the standing
+facts (network is always on). `query` narrows it to matching skills, tools, plugins
+and apps and adds their descriptions. Call it before briefing work that might lean
+on one.
+
+A skill is invoked by writing its mention in the prompt — `$deep-research`,
+`$documents`, `$presentations` — and also fires implicitly when the brief matches
+its description. An app is mentioned as `[$Name](app://connector_id)`; MCP tools by
+name. Plugins are installed and enabled in codex itself (`codex plugin list|add`,
+the `[plugins."name@marketplace"]` tables in `~/.codex/config.toml`, or the ChatGPT
+app); the bridge changes nothing there.
+
+Three are worth knowing:
+
+- **Deep Research** (`$deep-research`) — OpenAI Deep Research inside codex:
+  multi-pass web research with cited sources, which Cowork and Claude Code threads
+  lack natively. Through codex it is metered against the account's Codex/Work
+  usage allowance rather than the Chat deep-research task quota (OpenAI help
+  center, September 2026; see `docs/research/2026-09-13-deep-research-quota.md`),
+  and it is the most expensive thing a thread does — one run reads well over a
+  million tokens — so spend it on questions that merit it, and run it on
+  `sol-high`, `sol-xhigh` or `astra-*` rather than a scout. Ask for the report in chat ("no
+  document, deck or site") with a Sources section; `codex_poll` returns it whole.
+  When it is worth keeping — it usually is — the caller writes the cleaned report
+  to markdown (`docs/research/<topic>.md`, say) with its sources; the bridge stores
+  nothing. Its clarifying-question step (`request_user_input`) cannot reach the
+  caller through the bridge yet, so tell it to state assumptions and proceed.
+- **Chrome** — the user's real Google Chrome through the ChatGPT Chrome extension:
+  logged-in sessions, open tabs, page content. Ask for the Chrome plugin by name
+  (the in-app Browser plugin is a separate, isolated browser). Each new site raises
+  an elicitation (`tool: access_browser_origin`, `persist_modes: ["always"]`):
+  `allow` grants once, `allow_class` grants that origin for good, `deny` blocks it.
+- **Computer Use** — native macOS app control through the Codex Computer Use app.
+  It works only when the `computer-use` MCP server is enabled in codex —
+  `enabled = true` under `[mcp_servers.computer-use]` in `~/.codex/config.toml`
+  (it ships disabled; `codex mcp list` shows the state) — and the app holds
+  Accessibility and Screen Recording permissions. Then `codex_capabilities`
+  lists it with its tools, and it asks for consent the same way Chrome does; until
+  then the map shows it with no tools and a thread reports it unavailable.
+
+Documents, presentations, spreadsheets, PDF, visualize, sites and the rest appear
+in the map with their mentions.
+
+Network access is on in both modes, always — web search, HTTP, package installs,
+git remotes; there is nothing to enable or approve. Containment is the sandbox
+(writes confined to `cwd`), not the network.
 
 ## Guarantees
 
