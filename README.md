@@ -339,7 +339,11 @@ Three are worth knowing:
   pages — codex itself prefers it over Computer Use for anything in a browser. Ask
   for the Chrome plugin by name (the in-app Browser plugin is a separate, isolated
   browser). It runs through `cua_repl`, which the map shows as `via: cua_repl` on
-  the Chrome plugin. Each new site raises an elicitation (`tool:
+  the Chrome plugin; tell codex to call the `cua_repl` `js` tool directly (first
+  call `cua.createBrowserTab("chrome", url, {sessionName})`), because those tools
+  are kept out of codex's code-mode `exec` tool and a model that searches for a
+  Chrome tool in there concludes the plugin is unreachable. Each new site raises
+  an elicitation (`tool:
   access_browser_origin`, `persist_modes: ["always"]`): `allow` grants once,
   `allow_class` grants that origin for good, `deny` blocks it.
 - **Computer Use** — native macOS app control through the Codex Computer Use app.
