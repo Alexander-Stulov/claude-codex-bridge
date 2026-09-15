@@ -108,6 +108,32 @@ start = next(p for m, p in sent if m == "thread/start")
 assert start.get("config") == {"windows.sandbox": "unelevated"}, start
 print("windows_sim: thread/start pin ok")
 
+# --- a follow-up turn that moves the thread passes the gate too ------------------------
+# The gate reads config/read on EVERY start and resume, so any fake app-server a test
+# hands codex_submit must answer it — tests/smoke.py once did not, and passed only on
+# POSIX, where the gate is skipped. Here the real gate runs against a fake that does.
+bridge.APP.windows_sandbox_mode = bridge.AppServer.windows_sandbox_mode.__get__(bridge.APP)
+sent.clear()
+def gated_request(method, params=None, timeout=30):
+    sent.append((method, params))
+    return {"config/read": {"config": {"windows": {"sandbox": "unelevated"}}, "layers": []},
+            "thread/start": {"thread": {"id": "t-moved"}},
+            "turn/start": {"turn": {"id": f"u{len(sent)}"}}}[method]
+bridge.APP.request = gated_request
+scratch_dir = os.path.join(project, "scratch-stand-in")
+os.makedirs(scratch_dir.replace("\\", "/"), exist_ok=True)
+bridge.new_scratch = lambda: scratch_dir
+first = bridge.codex_submit({"prompt": "research it", "model": "sol-high"})
+assert first["workspace"] == "scratch" and first["cwd"] == scratch_dir, first
+bridge.APP.threads["t-moved"]["state"] = "completed"
+second = bridge.codex_submit({"prompt": "save it", "model": "terra-medium", "thread": "t-moved", "cwd": project})
+assert second["workspace"] == "project", second
+methods = [m for m, _ in sent]
+assert methods.count("config/read") == 1 and methods.index("config/read") < methods.index("thread/start"), methods
+assert bridge._provenance(bridge.APP.threads["t-moved"])["workspace"] == "project"
+bridge.APP.threads.clear()
+print("windows_sim: moved thread passes the gate and reports project")
+
 # --- install() tells Windows users the route that works ------------------------------
 # Windows has no .mcpb file association, so "double-click it" leaves the user with an
 # Explorer prompt; the instruction has to be the Settings route, and only that.

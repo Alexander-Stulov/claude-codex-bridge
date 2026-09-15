@@ -592,7 +592,10 @@ bridge.APP.ensure = lambda: None
 def _fake_submit_request(method, params, timeout=120):
     _calls2.append(method)
     return {"thread/start": {"thread": {"id": "t30"}},
-            "turn/start": {"turn": {"id": f"u{len(_calls2)}"}}}[method]
+            "turn/start": {"turn": {"id": f"u{len(_calls2)}"}},
+            # on Windows codex_submit gates every start/resume on the sandbox mode, read
+            # fresh from config/read; answer it, or this section only passes on POSIX
+            "config/read": {"config": {"windows": {"sandbox": "unelevated"}}, "layers": []}}[method]
 bridge.APP.request = _fake_submit_request
 try:
     r1 = bridge.codex_submit({"prompt": "research it", "model": "sol-high"})
