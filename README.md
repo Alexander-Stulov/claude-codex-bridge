@@ -173,9 +173,10 @@ reached the bridge (not only `codex exec`), run `python3 tests/context_live.py`.
 | Tool | Purpose |
 |---|---|
 | `codex_check` | Preflight: codex present, version, models, threads in flight |
+| `codex_capabilities` | What codex can do here: plugins and their skills, MCP servers and tools, connected apps |
 | `codex_submit` | Start a thread, add a turn to one, or steer a running turn. Returns immediately |
 | `codex_poll` | State, progress snapshot, pending approvals, and the complete output once done |
-| `codex_approve` | Rule on an approval the thread is parked on |
+| `codex_approve` | Rule on an approval the thread is parked on — a command, file change, permission, or an MCP server's elicitation |
 | `codex_interrupt` | Stop the active turn; the thread stays usable |
 | `codex_compact` | Summarise the thread's history now, at a boundary you choose |
 
@@ -277,7 +278,11 @@ a private scratch workspace. Point concurrent write threads at different `cwd`
 
 `mode` is `write` (default) or `read`; both keep network access and the full tool
 surface. In-scope work never asks for approval — a request means codex hit the
-sandbox boundary or a suspicious-command rule.
+sandbox boundary or a suspicious-command rule. An MCP server codex is using can
+also park the thread on an *elicitation* — a permission prompt (a browser plugin
+asking to open a tab, say) or a short form — and it routes to the caller the same
+way: `allow` accepts, `deny` declines, `allow_always` has it remembered for the
+session when the request offers that, and `grant` carries a form's answers.
 
 Containment is codex's own sandbox, not the bridge's: Seatbelt on macOS, always on;
 codex's restricted-token sandbox on Windows, which is opt-in (see Prerequisites) —
@@ -289,6 +294,73 @@ denial — an exception codex's own test suite documents. Approvals are the
 deliberate exception to all of it: a command you approve, or one matched by an
 execpolicy allow rule — including every class `allow_class` grants — runs outside
 the sandbox.
+
+## Plugins, skills and apps
+
+codex brings its own plugins, MCP servers and connected ChatGPT apps, and the
+bridge exposes them as they are. `codex_capabilities` asks the app-server what is
+installed and returns one map: every enabled plugin with the skills it
+contributes, every MCP server with its tools, the connected apps, and the standing
+facts (network is always on). `query` narrows it to matching skills, tools, plugins
+and apps and adds their descriptions. Call it before briefing work that might lean
+on one.
+
+A skill is invoked by passing its name in `codex_submit`'s `skills` —
+`["deep-research-work:deep-research"]`, or just `["deep-research"]` when that is
+unique — and the bridge sends its instructions with the turn's input as the
+structured skill item codex's own clients use. A `$skill` typed into the prompt is
+*not* honoured through the app-server: two live threads asked to quote the heading
+of the skill such a mention loaded answered NONE, while the structured item made
+the model quote it. Skills also fire implicitly when the brief matches their
+description. An app is mentioned in the prompt as `[$Name](app://connector_id)`;
+MCP tools by name. Plugins are installed and enabled in codex itself (`codex plugin list|add`,
+the `[plugins."name@marketplace"]` tables in `~/.codex/config.toml`, or the ChatGPT
+app); the bridge changes nothing there.
+
+Three are worth knowing:
+
+- **Deep Research** (`skills: ["deep-research"]`) — OpenAI Deep Research inside codex:
+  multi-pass web research with cited sources, which Cowork and Claude Code threads
+  lack natively. Through codex it is metered against the account's Codex/Work
+  usage allowance rather than the Chat deep-research task quota (OpenAI help
+  center, September 2026; see `docs/research/2026-09-13-deep-research-quota.md`),
+  and it is the most expensive thing a thread does — one run reads well over a
+  million tokens — so spend it on questions that merit it, and run it on
+  `sol-high`, `sol-xhigh` or `astra-*` rather than a scout. Ask for the report in chat ("no
+  document, deck or site") with a Sources section; `codex_poll` returns it whole.
+  When it is worth keeping — it usually is — add a turn on the same thread with
+  `cwd` set to the project and ask codex to save the report to markdown
+  (`docs/research/<topic>.md`, say): it writes it verbatim with every source, in
+  about a minute on `terra-medium`. Or write a condensed version yourself from the
+  poll output. The bridge stores nothing. Its clarifying-question step (`request_user_input`) cannot reach the
+  caller through the bridge yet, so tell it to state assumptions and proceed.
+- **Chrome** — the user's real Google Chrome through the ChatGPT Chrome extension:
+  logged-in sessions, open tabs, page content, and the easy way to work with web
+  pages — codex itself prefers it over Computer Use for anything in a browser. Ask
+  for the Chrome plugin by name (the in-app Browser plugin is a separate, isolated
+  browser). It runs through `cua_repl`, which the map shows as `via: cua_repl` on
+  the Chrome plugin; tell codex to call the `cua_repl` `js` tool directly (first
+  call `cua.createBrowserTab("chrome", url, {sessionName})`), because those tools
+  are kept out of codex's code-mode `exec` tool and a model that searches for a
+  Chrome tool in there concludes the plugin is unreachable. Each new site raises
+  an elicitation (`tool:
+  access_browser_origin`, `persist_modes: ["always"]`): `allow` grants once,
+  `allow_class` grants that origin for good, `deny` blocks it.
+- **Computer Use** — native macOS app control through the Codex Computer Use app.
+  It runs through the same `cua_repl` `js` tool as Chrome (plugin
+  `unified-computer-use`): ask for Computer Use by name and codex opens the app
+  with `cua.getApp`. The first use of each app raises an elicitation (`tool:
+  get_app_state`, `persist_modes: ["session", "always"]`): `allow` grants once,
+  `allow_always` for the session, `allow_class` for good. A `computer-use` MCP
+  server shown with no tools is a legacy `config.toml` entry, not the
+  capability; the map marks such entries `source: config.toml`.
+
+Documents, presentations, spreadsheets, PDF, visualize, sites and the rest appear
+in the map with their mentions.
+
+Network access is on in both modes, always — web search, HTTP, package installs,
+git remotes; there is nothing to enable or approve. Containment is the sandbox
+(writes confined to `cwd`), not the network.
 
 ## Guarantees
 

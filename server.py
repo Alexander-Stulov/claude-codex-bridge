@@ -11,8 +11,9 @@ wire format). Sessions are real codex threads: they hold context between calls,
 accept follow-up turns, can be steered mid-turn, and survive a bridge restart via
 thread/resume.
 
-Exposed as six MCP tools:
+Exposed as seven MCP tools:
   codex_check      readiness, models, live threads
+  codex_capabilities  what codex can do here: plugins and their $skills, MCP servers, apps
   codex_submit     new thread or next turn (or steer a running one); per-turn model,
                    mode, cwd and JSON output schema
   codex_poll       snapshot: state, what it is doing now, pending approvals, final output
@@ -22,9 +23,10 @@ Exposed as six MCP tools:
 
 Posture: full tool surface, live web search, network in both modes. The sandbox
 envelope (mode + cwd) is what keeps work contained, so in-scope reads, writes and
-commands never generate approval traffic. Only sandbox escapes and execpolicy
-`prompt` rules escalate — and those route to the caller (approvalsReviewer=user),
-never to a silent auto-accept.
+commands never generate approval traffic. Only sandbox escapes, execpolicy
+`prompt` rules and MCP elicitations (a tool server asking for a permission or a
+form) escalate — and those route to the caller (approvalsReviewer=user), never to
+a silent auto-accept or auto-decline.
 
 Install (idempotent, re-run after updates):  python3 server.py --install
 Then open the built .mcpb once via the Desktop UI (the GUI step that registers the
@@ -78,15 +80,21 @@ MODELS by task weight: luna-medium/high = scouting and mechanical extraction - s
 
 WHERE IT WORKS: cwd is the one location knob - any existing directory, normally the folder the calling session is already in. Nothing to register: a new project or a worktree parked anywhere works immediately. Reads still see the surrounding repo; writes are confined to cwd, so point it at the repo for repo-wide work or at a subdirectory to contain the blast radius. Omit it for work that needs no repo (research, reasoning, throwaway code) and the thread gets a private scratch workspace - the result says workspace: scratch. mode is write (default) or read. Point concurrent write threads at different cwd (e.g. separate worktrees) and they cannot collide. On Windows the bridge dispatches only while codex's own sandbox is enabled; codex_check reports windows_sandbox and the fix when it is not.
 
+CAPABILITIES: codex arrives with plugins (skills), MCP servers and connected apps of its own, beyond files and shell. Before briefing work that might lean on one - research, documents, decks, spreadsheets, browsing, desktop control, an external service - call codex_capabilities: it lists every enabled plugin with the $skill mentions it contributes, every MCP server with its tools, and the connected apps; query narrows it. Invoke a skill by passing its name in codex_submit's skills (skills: ["deep-research-work:deep-research"], or just "deep-research" when that is unique) - the bridge injects the skill's instructions into the turn; a $mention typed into the prompt is not honoured through the app-server. An app is mentioned in the prompt as [$Name](app://id); MCP tools by name. Skills also fire implicitly when the brief matches their description.
+
+PLUGINS: three worth knowing. deep-research (skills: ["deep-research"]) is OpenAI Deep Research inside codex - multi-pass web research with cited sources, the capability Cowork and Code threads lack natively. Through codex it is metered against the account's Codex/Work usage allowance rather than the Chat deep-research task quota (OpenAI help center, September 2026), and it is the most expensive thing a thread does - one run reads well over a million tokens - so spend it on questions that merit it, and run it on sol-high/xhigh or astra, never a scout. Ask for the report in chat - say no document, deck or site - with a Sources section; codex_poll returns it whole. When it is worth keeping, and it usually is, add a turn on the same thread with cwd set to the project and ask codex to save the report to a markdown file (docs/research/<topic>.md, say) - it writes it verbatim with every source, in about a minute on terra-medium; or write a condensed version yourself from the poll output. The bridge stores nothing. Its clarifying questions cannot reach you through this bridge yet, so tell it to state assumptions and proceed. Chrome is the user's real Google Chrome through the ChatGPT Chrome extension - logged-in sessions, open tabs, page content - and the easy way to work with web pages: codex itself prefers it over Computer Use for anything in a browser. Ask for the Chrome plugin by name and tell codex to call the cua_repl js tool directly - its first call is cua.createBrowserTab("chrome", url, {sessionName}) - because cua_repl's tools are kept out of codex's code-mode exec tool, and a model that goes looking for a chrome tool in there concludes the plugin is unreachable. Each new site raises an elicitation (tool access_browser_origin) that allow grants once and allow_class grants for good. Computer Use is native macOS app control through the Codex Computer Use app, and it runs through the same cua_repl js tool as Chrome (plugin unified-computer-use): ask for Computer Use by name and codex opens the app with cua.getApp; the first use of each app raises an elicitation (tool get_app_state, persist_modes session and always) that allow grants once, allow_always for the session, allow_class for good. A computer-use MCP server listed with no tools is a legacy config.toml entry, not the capability - ignore it. Documents, presentations, spreadsheets, pdf, visualize, sites and the rest appear in codex_capabilities with their mentions.
+
+NETWORK: codex has network access in both modes, always - web search, http, package installs, git remotes; there is nothing to enable or approve. Containment is the sandbox (writes confined to cwd), not the network.
+
 JSON ANY TIME: pass output_schema on any turn - new or existing thread - and that turn's final message is constrained to it. Omit it for prose.
 
 IMAGES: pass images on any turn - a list of file paths (absolute or relative to cwd) or http(s)/data URLs. Screenshots, mockups, diagrams, a rendering that looks wrong. A bad path is rejected before the turn starts.
 
-APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, codex hit the sandbox boundary or a suspicious-command rule; the request and the thread's declared scope come with it. Decide, then codex_approve(request_id, allow|allow_always|deny) and keep polling - allow_always covers that exact command again, and allow_class covers the whole command class when the request offers proposed_execpolicy_amendment (the one that stops a build loop re-prompting on every git add). allow_class writes an allow rule into codex's execpolicy: it outlives this session, and commands it matches run outside the sandbox from then on - grant it only for classes you would trust with the whole machine tomorrow.
+APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, codex hit the sandbox boundary or a suspicious-command rule; the request and the thread's declared scope come with it. Decide, then codex_approve(request_id, allow|allow_always|deny) and keep polling - allow_always covers that exact command again, and allow_class covers the whole command class when the request offers proposed_execpolicy_amendment (the one that stops a build loop re-prompting on every git add). allow_class writes an allow rule into codex's execpolicy: it outlives this session, and commands it matches run outside the sandbox from then on - grant it only for classes you would trust with the whole machine tomorrow. An MCP server codex is using can park the thread the same way, on an elicitation (kind: elicitation): a permission prompt from that server - a browser plugin asking to open a tab, say - or a short form. The request comes with server, message, requested_schema and persist_modes. codex_approve resolves it too: allow accepts, deny declines, allow_always accepts and has it remembered for the session (allow_class: permanently) when persist_modes offers that - a mode the request did not offer is never sent, and the answer says so. When requested_schema has fields, pass the answers in grant as an object keyed by field name; required fields are checked before anything is sent, so a refused grant can be retried.
 
 RESULTS: completed carries output (text, or your schema's JSON) plus bridge-stamped provenance - trust that over anything the model says about itself. Errors come back verbatim, including schema rejections."""
 
-SERVER_INFO = {"name": "codex", "version": "0.13.2"}
+SERVER_INFO = {"name": "codex", "version": "0.14.0"}
 
 # Friendly slug -> (wire model, reasoning effort). One caller-facing knob; the
 # app-server takes them as separate per-turn fields.
@@ -130,6 +138,16 @@ APPROVAL_KINDS = {
     "applyPatchApproval": "file_change",
     "mcpServer/elicitation/request": "elicitation",
 }
+
+# Keys codex puts in an elicitation's `_meta` when the elicitation is one of its own
+# MCP tool-call approvals (codex-rs/protocol/src/mcp_approval_meta.rs). `_meta` is
+# untyped on the wire, so the schema fixture cannot vouch for these names — they are
+# pinned here verbatim instead. A request lists the persistence it offers under
+# `persist` (one mode or a list); the reply names the one chosen.
+ELICITATION_PERSIST_KEY = "persist"
+ELICITATION_PERSIST_SESSION = "session"    # remembered for the rest of the session
+ELICITATION_PERSIST_ALWAYS = "always"      # written to codex's MCP policy: outlives the session
+ELICITATION_TOOL_NAME_KEY = "tool_name"
 
 # Storage belongs to codex (which persists threads) and to the caller (which has the
 # context window). The bridge accumulates nothing: progress is a SNAPSHOT of what is
@@ -325,14 +343,14 @@ def compaction_runway(window, used):
 IMAGE_URL_SCHEMES = ("http://", "https://", "data:")
 
 
-def build_input(prompt, images, cwd):
-    """A turn's input is a list of typed items: the text, then any images.
+def build_input(prompt, images, cwd, skills=None):
+    """A turn's input is a list of typed items: any skills to inject, the text, then images.
 
     A URL and a file on disk are different wire types, so the caller passes plain
     strings and this decides. Bad paths are caught here — before the turn starts —
     because a turn that dies on a missing file wastes the whole round trip.
     """
-    items = [{"type": "text", "text": str(prompt)}]
+    items = list(skills or []) + [{"type": "text", "text": str(prompt)}]
     for ref in images or []:
         ref = str(ref).strip()
         if not ref:
@@ -381,6 +399,7 @@ class AppServer:
         self.threads = {}        # thread_id -> thread state dict
         self.requests = {}       # approval request id -> {kind, params, thread, view}
         self.windows_sandbox = None   # last windowsSandbox/readiness status (Windows only)
+        self.skill_catalog_cache = None   # (generation, [{name, path, enabled}]) — see skill_catalog()
 
     # ---- lifecycle -------------------------------------------------------
     def alive(self):
@@ -581,12 +600,11 @@ class AppServer:
                 # Nothing we can surface it on, and an unanswered request parks the
                 # turn forever — decline rather than swallow it.
                 log(f"{method} for unknown thread {tid} — declining")
-                self.respond(rid, {"decision": "decline"} if kind != "permissions"
-                             else {"permissions": {}, "scope": "turn"})
+                self.respond(rid, decline_response(kind))
                 return
             # One canonical table. codex can hold SEVERAL approvals open on a thread,
             # so poll derives the list from here rather than keeping a second copy.
-            self.requests[rid] = {"kind": kind, "params": params, "thread": tid, "view": {
+            view = {
                 "request_id": rid,
                 "kind": kind,
                 "reason": params.get("reason"),
@@ -594,7 +612,10 @@ class AppServer:
                 "cwd": params.get("cwd"),
                 "permissions": params.get("permissions"),
                 "proposed_execpolicy_amendment": params.get("proposedExecpolicyAmendment"),
-            }}
+            }
+            if kind == "elicitation":
+                view.update(elicitation_view(params))     # what the MCP server is asking
+            self.requests[rid] = {"kind": kind, "params": params, "thread": tid, "view": view}
             st["state"] = "awaiting_approval"
             self._note(st, now="waiting for your approval")
 
@@ -927,6 +948,186 @@ def codex_check(_args):
     return info
 
 
+NETWORK_NOTE = ("always on in both modes — web search, http, package installs, git remotes; nothing to "
+                "enable or approve. Containment is the sandbox (writes confined to cwd), not the network.")
+HOW_TO_USE = ("pass a skill's name in codex_submit's skills (deep-research-work:deep-research, or just "
+              "deep-research when that is unique) and the bridge injects its instructions into the turn — a "
+              "$mention typed into the prompt is not honoured through the app-server. An app is mentioned in the "
+              "prompt as [$Name](app://id); MCP tools by name. Skills also fire implicitly when the brief matches "
+              "their description. Chrome (the ChatGPT Chrome extension), the in-app Browser and Computer Use are "
+              "surfaces of one server, cua_repl (plugin unified-computer-use): ask for them by name in the prompt; "
+              "codex prefers Chrome over Computer Use for anything on a web page.")
+
+# OpenAI's bundled surface plugins carry no skill and no server of their own: their capability is
+# served by the unified-computer-use plugin's cua_repl server (its js tool's browser and app
+# surfaces). Nothing on the wire says so, and without it the map shows them empty.
+SERVED_BY = {"chrome@openai-bundled": "cua_repl", "browser@openai-bundled": "cua_repl",
+             "computer-use@openai-bundled": "cua_repl"}
+
+
+def skill_catalog():
+    """Every skill codex lists here — name, SKILL.md path, enabled — fetched once per
+    app-server child. plugin/installed goes first: skills/list only lists a remote-marketplace
+    plugin's skills once that process has loaded the remote catalog."""
+    APP.ensure()
+    cached = APP.skill_catalog_cache
+    if cached and cached[0] == APP.gen:
+        return cached[1]
+    APP.request("plugin/installed", {"cwds": None, "installSuggestionPluginNames": None}, timeout=60)
+    res = APP.request("skills/list", {"cwds": [], "forceReload": True}, timeout=60)
+    catalog, seen = [], set()
+    for entry in (res or {}).get("data") or []:
+        for sk in entry.get("skills") or []:
+            if sk.get("name") in seen:
+                continue
+            seen.add(sk.get("name"))
+            catalog.append({"name": sk.get("name"), "path": sk.get("path"),
+                            "enabled": sk.get("enabled") is not False})
+    APP.skill_catalog_cache = (APP.gen, catalog)
+    return catalog
+
+
+def resolve_skills(names, catalog=None):
+    """Skill names as codex lists them -> the structured input items codex injects from.
+
+    Verified, not assumed: a `$skill` written into the prompt text is not honoured through
+    the app-server (two live threads answered NONE to "quote the first heading of the skill
+    this mention loaded"), while a {type: skill, name, path} input item made the model quote
+    the SKILL.md heading. Names resolve exactly, or by the part after the colon when that is
+    unique; anything else is refused here, before the turn starts."""
+    items = []
+    for want in names or []:
+        want = str(want).strip().lstrip("$")
+        if not want:
+            continue
+        if catalog is None:
+            catalog = skill_catalog()
+        hits = [sk for sk in catalog if sk["name"] == want] \
+            or [sk for sk in catalog if str(sk["name"]).split(":")[-1] == want]
+        if not hits:
+            raise ValueError(f"unknown skill {want!r} — codex_capabilities lists the skills codex has here")
+        if len(hits) > 1:
+            raise ValueError(f"skill {want!r} is ambiguous — pass one of: "
+                             + ", ".join(str(sk["name"]) for sk in hits))
+        skill = hits[0]
+        if not skill.get("enabled", True):
+            raise ValueError(f"skill {skill['name']!r} is disabled in codex, so it cannot be injected")
+        items.append({"type": "skill", "name": str(skill["name"]).split(":")[-1], "path": skill["path"]})
+    return items
+
+
+def _one_line(value, limit):
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def capabilities_inventory(plugins_res, skills_res, mcp_res, apps_res, query=None, errors=None):
+    """Shape four app-server answers into one map of what codex can do here.
+
+    A map, not a manual: the default view carries names, mentions and one-line summaries
+    only, so it stays a few KB however many skills are installed; a query brings the
+    matching descriptions with it. A source that failed is reported under `errors` and
+    the rest of the map still comes back — a missing app list is no reason to hide the
+    plugins."""
+    plugins, skills, servers, apps, seen = [], [], [], [], set()
+    for market in (plugins_res or {}).get("marketplaces") or []:
+        for p in market.get("plugins") or []:
+            iface = p.get("interface") or {}
+            plugins.append({"id": p.get("id") or f"{p.get('name')}@{market.get('name')}",
+                            "name": iface.get("displayName") or p.get("name"),
+                            "summary": _one_line(iface.get("shortDescription") or iface.get("longDescription"), 120),
+                            "enabled": bool(p.get("enabled")), "skills": []})
+    by_id = {p["id"]: p for p in plugins}
+    for entry in (skills_res or {}).get("data") or []:
+        for s in entry.get("skills") or []:
+            if s.get("enabled") is False or s.get("name") in seen:
+                continue                      # a disabled skill cannot be invoked; one cwd's copy is enough
+            seen.add(s.get("name"))
+            rec = {"name": s.get("name"), "plugin": s.get("pluginId"), "path": s.get("path"),
+                   "scope": s.get("scope"), "description": s.get("description") or ""}
+            skills.append(rec)
+            if rec["plugin"] in by_id:
+                by_id[rec["plugin"]]["skills"].append(rec["name"])
+    for srv in (mcp_res or {}).get("data") or []:
+        tools = srv.get("tools") or {}
+        if not isinstance(tools, dict):
+            tools = {t.get("name"): t for t in tools if isinstance(t, dict)}
+        status = srv.get("runtimeStatus")
+        if not tools:
+            # A config.toml entry that is disabled, or a server that did not start. Not a verdict
+            # on the capability: Computer Use is served by cua_repl while a same-named legacy
+            # [mcp_servers.computer-use] entry sits here with nothing in it.
+            status = status or "no tools listed (disabled in config.toml, or not started)"
+        servers.append({"name": srv.get("name"), "status": status, "plugin": srv.get("pluginId"),
+                        "source": "plugin" if srv.get("pluginId") else "config.toml",
+                        "tools": sorted(tools), "_tools": tools})
+    # A plugin's MCP servers, so a plugin with no skills (Computer Use, Chrome) still shows
+    # what it brings — the capability lives in the server's tools, not in a skill.
+    running = {srv["name"] for srv in servers if srv["tools"]}
+    for p in plugins:
+        p["servers"] = [srv["name"] for srv in servers if srv["plugin"] == p["id"]]
+        if not p["skills"] and not p["servers"] and p["id"] in SERVED_BY:
+            host = SERVED_BY[p["id"]]
+            p["via"] = host if host in running else f"{host} (not running)"
+    for a in (apps_res or {}).get("apps") or []:
+        apps.append({"name": a.get("runtimeName") or a.get("id"),
+                     "mention": f"[${a.get('runtimeName') or a.get('id')}](app://{a.get('id')})",
+                     "enabled": bool(a.get("enabled")), "callable": bool(a.get("callable"))})
+
+    out = {"network": NETWORK_NOTE, "how_to_use": HOW_TO_USE}
+    if query:
+        q = str(query).lower()
+        matches = []
+        for p in plugins:
+            if q in f"{p['name']} {p['summary']} {p['id']}".lower():
+                matches.append({"kind": "plugin", **p})
+        for s in skills:
+            if q in f"{s['name']} {s['description']}".lower():
+                matches.append({"kind": "skill", "name": s["name"], "plugin": s["plugin"], "path": s["path"],
+                                "description": _one_line(s["description"], 300)})
+        for srv in servers:
+            for tname, t in srv["_tools"].items():
+                desc = (t.get("description") if isinstance(t, dict) else "") or ""
+                if q in f"{tname} {desc}".lower():
+                    matches.append({"kind": "tool", "name": tname, "server": srv["name"], "description": _one_line(desc, 300)})
+        for a in apps:
+            if q in a["name"].lower():
+                matches.append({"kind": "app", **a})
+        out.update({"query": query, "matches": matches})
+    else:
+        out.update({"plugins": plugins,
+                    "system_skills": [s["name"] for s in skills if not s["plugin"]],
+                    "mcp_servers": [{k: v for k, v in srv.items() if k != "_tools"} for srv in servers],
+                    "apps": apps,
+                    "counts": {"plugins": len(plugins), "skills": len(skills),
+                               "mcp_servers": len(servers), "apps": len(apps)}})
+    if errors:
+        out["errors"] = errors
+    return out
+
+
+def codex_capabilities(args):
+    """What codex can do on this machine, asked of the app-server itself rather than
+    guessed from disk: codex owns the discovery rules (marketplaces, config, caches)."""
+    APP.ensure()
+    results, errors = {}, {}
+    # plugin/installed goes FIRST. skills/list only lists a remote-marketplace plugin's
+    # skills once that app-server process has loaded the remote catalog, which
+    # plugin/installed does — asked the other way round, Deep Research is invisible.
+    for key, method, params in (
+            ("plugins", "plugin/installed", {"cwds": None, "installSuggestionPluginNames": None}),
+            ("skills", "skills/list", {"cwds": [], "forceReload": True}),
+            ("mcp", "mcpServerStatus/list", {}),
+            ("apps", "app/installed", {})):
+        try:
+            results[key] = APP.request(method, params, timeout=60)
+        except CodexError as e:
+            results[key] = None
+            errors[key] = f"{method}: {json.dumps(e.payload)[:200]}"
+    return capabilities_inventory(results["plugins"], results["skills"], results["mcp"], results["apps"],
+                                  query=args.get("query"), errors=errors or None)
+
+
 def codex_submit(args):
     prompt = args.get("prompt")
     if not prompt or not str(prompt).strip():
@@ -943,6 +1144,8 @@ def codex_submit(args):
         schema = json.loads(schema)
 
     APP.ensure()
+    skills = args.get("skills")
+    skill_items = resolve_skills([skills] if isinstance(skills, str) else skills)   # refused before any state change
     tid = args.get("thread")
 
     if tid:
@@ -987,7 +1190,7 @@ def codex_submit(args):
                     f"Drop {'it' if len(ignored) == 1 else 'them'} to steer, or wait for "
                     f"the turn to finish and submit a new one.")
             APP.request("turn/steer", {"threadId": tid, "expectedTurnId": st["turn_id"],
-                                       "input": build_input(prompt, args.get("images"), st["cwd"])})
+                                       "input": build_input(prompt, args.get("images"), st["cwd"], skill_items)})
             return {"thread": tid, "turn": st["turn_id"], "state": "running", "steered": True}
     else:
         cwd, kind = resolve_workspace(args.get("cwd"))
@@ -1008,12 +1211,15 @@ def codex_submit(args):
 
     # Per-turn overrides: model, effort, cwd, sandbox and schema all apply to this turn.
     # A follow-up may move the thread; each cwd is validated the same way and stamped.
-    cwd = resolve_workspace(args.get("cwd"))[0] if args.get("cwd") else st["cwd"]
-    turn_input = build_input(prompt, args.get("images"), cwd)   # validated before any state change
+    if args.get("cwd"):
+        cwd, kind = resolve_workspace(args["cwd"])      # a follow-up may move the thread
+    else:
+        cwd, kind = st["cwd"], st.get("workspace", "project")
+    turn_input = build_input(prompt, args.get("images"), cwd, skill_items)   # validated before any state change
     # Under the lock: the reader mutates this same state. Everything a turn produces is
     # cleared, so a fresh turn can never report the previous turn's tokens or duration.
     with APP.lock:
-        st.update({"mode": mode, "model": model_slug, "cwd": cwd,
+        st.update({"mode": mode, "model": model_slug, "cwd": cwd, "workspace": kind,
                    "structured": schema is not None, "terminal_at": None,
                    "started_at": time.time(), "changed_at": time.time(), "activity": {},
                    "state": "running", "output": None, "error": None, "final_message": None,
@@ -1124,6 +1330,84 @@ def _peek_request(rid):
                      + (f" — pending: {pending}" if pending else " — nothing is awaiting approval"))
 
 
+def decline_response(kind):
+    """A refusal in the reply shape this request type defines. A permission request
+    wants an (empty) grant, an elicitation an MCP action, a command or patch a
+    decision. codex logs a reply in the wrong shape as malformed before it falls
+    back to declining, so the shape matters even when the answer is no."""
+    if kind == "permissions":
+        return {"permissions": {}, "scope": "turn"}
+    if kind == "elicitation":
+        return {"action": "decline"}
+    return {"decision": "decline"}
+
+
+def persist_modes(meta):
+    """The persistence an elicitation offers, as a list. codex attaches `persist` to
+    its own MCP tool-call approvals as one mode or a list of modes; only those may be
+    echoed back, so a mode the request never offered is never sent."""
+    offered = meta.get(ELICITATION_PERSIST_KEY) if isinstance(meta, dict) else None
+    if isinstance(offered, str):
+        return [offered]
+    if isinstance(offered, list):
+        return [m for m in offered if isinstance(m, str)]
+    return []
+
+
+def elicitation_view(params):
+    """What an MCP server is asking, so the caller can decide and, for a form, answer.
+    message, mode and requested_schema (or url) are the request itself; tool and
+    persist_modes come from the `_meta` codex attaches to its MCP tool-call approvals."""
+    meta = params.get("_meta")
+    meta = meta if isinstance(meta, dict) else {}
+    return {"server": params.get("serverName"),
+            "message": params.get("message"),
+            "mode": params.get("mode"),
+            "requested_schema": params.get("requestedSchema"),
+            "url": params.get("url"),
+            "tool": meta.get(ELICITATION_TOOL_NAME_KEY),
+            "persist_modes": persist_modes(meta)}
+
+
+def elicitation_response(params, decision, grant):
+    """The reply to an MCP elicitation for the caller's decision — codex's
+    McpServerElicitationRequestResponse: action accept | decline, content for a form,
+    _meta.persist when the grant is to be remembered. Returns (result, note).
+
+    content goes on every accept. codex itself reads a bare accept as content {}, but
+    the reply travels on to the MCP server, and a complete ElicitResult holds however
+    that server checks it. Required fields are checked here, before anything is sent:
+    the request is still pending at this point, so a refused grant stays retryable."""
+    if decision == "deny":
+        return {"action": "decline"}, None
+    content = json.loads(grant) if isinstance(grant, str) else grant
+    if content is None:
+        content = {}
+    if not isinstance(content, dict):
+        raise ValueError("grant for an elicitation must be a JSON object — the form's answers keyed by field name")
+    schema = params.get("requestedSchema")
+    if isinstance(schema, dict):
+        missing = [name for name in (schema.get("required") or []) if name not in content]
+        if missing:
+            raise ValueError(
+                f"elicitation from {params.get('serverName')} requires {missing} — pass them in grant, an "
+                f"object keyed by field name. Fields: {json.dumps(schema.get('properties') or {})[:600]}")
+    result = {"action": "accept", "content": content}
+    note = None
+    if decision in ("allow_always", "allow_class"):
+        offered = persist_modes(params.get("_meta"))
+        wanted = ELICITATION_PERSIST_SESSION if decision == "allow_always" else ELICITATION_PERSIST_ALWAYS
+        if wanted in offered:
+            result["_meta"] = {ELICITATION_PERSIST_KEY: wanted}
+        elif wanted == ELICITATION_PERSIST_ALWAYS and ELICITATION_PERSIST_SESSION in offered:
+            result["_meta"] = {ELICITATION_PERSIST_KEY: ELICITATION_PERSIST_SESSION}
+            note = "this elicitation does not offer 'always' persistence — accepted for the session instead"
+        else:
+            note = (f"this elicitation does not offer '{wanted}' persistence"
+                    + (f" (offered: {', '.join(offered)})" if offered else "") + " — accepted once")
+    return result, note
+
+
 def codex_approve(args):
     note = None
     rid = args.get("request_id")
@@ -1145,7 +1429,7 @@ def codex_approve(args):
         scope = args.get("scope") or ("session" if decision == "allow_always" else "turn")
         result = {"permissions": granted, "scope": scope}
     elif kind == "elicitation":
-        result = {"action": "decline"}
+        result, note = elicitation_response(req["params"], decision, args.get("grant"))
     else:  # command / file_change
         amendment = req["params"].get("proposedExecpolicyAmendment")
         if decision == "allow_class" and amendment:
@@ -1222,28 +1506,45 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "codex_capabilities",
+        "description": ("What codex can do on this machine beyond files and shell: every enabled plugin with the "
+                        "skills it contributes (pass their names in codex_submit's skills), every MCP server with "
+                        "its tools, and the connected apps — "
+                        "plus the standing facts (network always on). Call it before briefing work that might lean on "
+                        "one: research (deep-research), documents, decks, spreadsheets, browsing, desktop control, an "
+                        "external service. Spawns the app-server if it is idle. query narrows the answer to matching "
+                        "skills, tools, plugins and apps and adds their descriptions."),
+        "inputSchema": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Substring to search across skill, tool, plugin and app names and descriptions — research, spreadsheet, chrome. Omit for the whole map."}},
+            "additionalProperties": False},
+    },
+    {
         "name": "codex_submit",
         "description": ("Start a codex thread or add a turn to one. No thread → new session; a thread that is idle → "
                         "next turn with full prior context; a thread mid-turn → the input steers the running turn. "
-                        "Returns instantly: poll with codex_poll. Pass output_schema on any turn to get JSON back."),
+                        "Returns instantly: poll with codex_poll. Pass output_schema on any turn to get JSON back. Inject a plugin skill "
+                        "with skills (codex_capabilities lists their names)."),
         "inputSchema": {"type": "object", "properties": {
             "prompt": {"type": "string", "description": "The instruction. For a new thread this is all codex sees — make it self-contained. Ask for the answer as output rather than a report file, and if it covers many items bound it here — cap, index, and what to do when they do not fit. Nothing else will."},
             "model": {"type": "string", "enum": sorted(MODELS),
                       "description": "luna=scouting, then hand findings to the model that does the work; terra=everyday work; sol=complex implementation; astra=GPT-6 heavyweight for hard, long-context or agentic work and independent review. Effort: high/xhigh are the working range; max rarely improves on xhigh; ultra = xhigh plus proactive sub-agent delegation, for work that splits into substantial independent parts (max for small or tightly-coupled work)."},
             "thread": {"type": "string", "description": "Continue this thread. Omit to start a new one."},
             "cwd": {"type": "string", "description": "Absolute path to the directory to work in — normally the folder this session is already in. Any existing directory works; nothing needs registering. Reads still see the surrounding repo; writes are confined here, so aim it at the narrowest directory the writes should reach. Omit for work that needs no repo (research, reasoning, throwaway code): the thread gets a private scratch workspace. Point concurrent write threads at different cwd (e.g. worktrees) and they cannot collide."},
-            "mode": {"type": "string", "enum": list(MODES), "description": "write (default) or read. Both keep network and the full tool surface."},
+            "mode": {"type": "string", "enum": list(MODES), "description": "write (default) or read. Both keep network access (always on) and the full tool surface."},
             "output_schema": {"type": ["object", "string"], "description": "JSON Schema constraining this turn's final message. Omit for prose."},
             "images": {"type": "array", "items": {"type": "string"},
-                       "description": "Images to send with this turn — screenshots, mockups, diagrams, a failing UI. Each entry is a file path (absolute, or relative to cwd) or an http(s)/data URL. Works on any turn, new thread or follow-up."}},
+                       "description": "Images to send with this turn — screenshots, mockups, diagrams, a failing UI. Each entry is a file path (absolute, or relative to cwd) or an http(s)/data URL. Works on any turn, new thread or follow-up."},
+            "skills": {"type": "array", "items": {"type": "string"},
+                       "description": "Skills to inject into this turn, by the names codex_capabilities lists (deep-research-work:deep-research, or just deep-research when that is unique). Each skill's instructions go on the wire with the input — a $mention typed into the prompt is not honoured. Unknown, ambiguous or disabled names are rejected before the turn starts."}},
             "required": ["prompt", "model"], "additionalProperties": False},
     },
     {
         "name": "codex_poll",
         "description": ("Where the thread is right now: state (running | awaiting_approval | completed | "
                         "failed), an activity snapshot (what it is doing and how much it has done), the "
-                        "pending approval request(s) when it is waiting, and the complete output once it is "
-                        "done. Idempotent — nothing is consumed, and the answer arrives whole rather than in "
+                        "pending approval request(s) when it is waiting — a command, file change, permission "
+                        "or an MCP elicitation, each with what is being asked — and the complete output "
+                        "once it is done. Idempotent — nothing is consumed, and the answer arrives whole rather than in "
                         "pieces to reassemble. Poll every 20-30s and relay activity in plain language."),
         "inputSchema": {"type": "object", "properties": {"thread": {"type": "string"}},
                         "required": ["thread"], "additionalProperties": False},
@@ -1255,12 +1556,17 @@ TOOLS = [
                         "For permission requests, grant may narrow the request to a subset. When the "
                         "request carries proposed_execpolicy_amendment, allow_class grants that whole class as a "
                         "codex execpolicy allow rule — it persists beyond this session, and commands it "
-                        "matches run outside the sandbox from then on."),
+                        "matches run outside the sandbox from then on. An elicitation (kind: elicitation) "
+                        "is an MCP server codex is using asking the caller something — a permission prompt "
+                        "such as a browser plugin opening a tab, or a short form. It resolves the same way: "
+                        "allow accepts, deny declines, allow_always accepts and has it remembered for the "
+                        "session and allow_class permanently, each only when the request's persist_modes "
+                        "offers it. When its requested_schema has fields, grant carries the answers."),
         "inputSchema": {"type": "object", "properties": {
             "request_id": {"type": ["string", "integer"]},
             "decision": {"type": "string", "enum": ["allow", "allow_always", "allow_class", "deny"],
-                         "description": "allow = this once. allow_always = this exact command, rest of session. allow_class = the whole command class (uses the request's proposed_execpolicy_amendment, e.g. any git add) — the one that actually stops a loop re-prompting. It is written to codex's execpolicy as an allow rule: it outlives the session and its matches run outside the sandbox from then on. deny = refuse; codex adapts."},
-            "grant": {"type": ["object", "string"], "description": "Permission requests only: the subset to grant. Omit to grant what was asked."},
+                         "description": "allow = this once. allow_always = this exact command, rest of session. allow_class = the whole command class (uses the request's proposed_execpolicy_amendment, e.g. any git add) — the one that actually stops a loop re-prompting. It is written to codex's execpolicy as an allow rule: it outlives the session and its matches run outside the sandbox from then on. deny = refuse; codex adapts. For an elicitation: allow = accept once, allow_always = accept and remember for the session, allow_class = accept and remember permanently — each only when the request's persist_modes offers it, otherwise accepted once with a note — deny = decline."},
+            "grant": {"type": ["object", "string"], "description": "Permission requests: the subset to grant; omit to grant what was asked. Elicitations: the form's answers as an object keyed by field name (a JSON string is accepted too) — required when requested_schema lists required fields; omit for a plain yes/no elicitation."},
             "scope": {"type": "string", "enum": ["turn", "session"]}},
             "required": ["request_id", "decision"], "additionalProperties": False},
     },
@@ -1282,7 +1588,8 @@ TOOLS = [
     },
 ]
 
-HANDLERS = {"codex_check": codex_check, "codex_submit": codex_submit, "codex_poll": codex_poll,
+HANDLERS = {"codex_check": codex_check, "codex_capabilities": codex_capabilities,
+            "codex_submit": codex_submit, "codex_poll": codex_poll,
             "codex_approve": codex_approve, "codex_interrupt": codex_interrupt,
             "codex_compact": codex_compact}
 

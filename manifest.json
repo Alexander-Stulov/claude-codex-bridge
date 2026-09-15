@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "codex",
   "display_name": "Codex",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "description": "Run OpenAI codex as an interactive subagent on this machine \u2014 sessions with follow-up turns, per-turn JSON schemas, approvals routed to the caller. No configuration.",
   "author": {
     "name": "Alexander Stulov"
@@ -25,6 +25,9 @@
   "tools": [
     {
       "name": "codex_check"
+    },
+    {
+      "name": "codex_capabilities"
     },
     {
       "name": "codex_submit"

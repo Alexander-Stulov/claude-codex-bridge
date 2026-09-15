@@ -38,7 +38,7 @@ assert manifest["version"] == version, (manifest["version"], version)
 
 tools = {t["name"] for t in out[2]["result"]["tools"]}
 assert tools == {"codex_check", "codex_submit", "codex_poll", "codex_approve", "codex_interrupt",
-                 "codex_compact"}, tools
+                 "codex_compact", "codex_capabilities"}, tools
 # The manifest's tool list is what the install preview shows and what a reviewer reads:
 # it must name exactly the tools the server registers, in the same order, or a new
 # tool ships invisible to anyone deciding whether to install.
@@ -322,3 +322,343 @@ assert bridge.refuse_reason(os.path.realpath(os.path.expanduser("~"))), "home mu
 assert bridge.refuse_reason(os.path.realpath(os.getcwd())) is None, "the repo itself must not be refused"
 assert bridge.SCRATCH_ROOT == os.path.normpath(bridge.SCRATCH_ROOT), bridge.SCRATCH_ROOT
 print("smoke: workspace refusal + scratch root ok")
+
+# --- 0.13.3: MCP elicitations are approvals, not auto-declines ------------------
+# An MCP server codex is using (a browser plugin, say) can park the thread on an
+# elicitation: a permission prompt or a short form. Since 0.4.0 the bridge answered
+# every one with decline whatever the caller decided, so codex_approve(allow) came
+# back {"sent": {"action": "decline"}} and the plugin reported the action blocked.
+_sent = {}
+bridge.APP.respond = lambda rid, result: _sent.update({"rid": rid, "result": result})
+bridge.APP.threads.clear(); bridge.APP.requests.clear()
+_st = bridge._new_thread_state("t20", "/tmp", "write", "astra-high")
+bridge.APP.threads["t20"] = _st
+
+
+def _elicit(rid, **extra):
+    params = {"threadId": "t20", "turnId": "turn-1", "serverName": "browser", "mode": "form",
+              "message": "Creating a new tab requires permission",
+              "requestedSchema": {"type": "object", "properties": {}}}
+    params.update(extra)
+    bridge.APP._on_server_request({"method": "mcpServer/elicitation/request", "id": rid,
+                                   "params": params})
+
+
+# the request surfaces with what is being asked, not just an id
+_elicit(20, _meta={"codex_approval_kind": "mcp_tool_call", "tool_name": "open_tab",
+                   "persist": ["session", "always"]})
+_view = bridge.codex_poll({"thread": "t20"})["requests"][0]
+assert _view["kind"] == "elicitation" and _view["server"] == "browser", _view
+assert _view["message"].startswith("Creating a new tab") and _view["mode"] == "form", _view
+assert _view["requested_schema"] == {"type": "object", "properties": {}}, _view
+assert _view["tool"] == "open_tab" and _view["persist_modes"] == ["session", "always"], _view
+
+# allow -> accept. codex treats a bare accept as content {}; it is sent explicitly so
+# the reply is a complete MCP ElicitResult however the MCP server reads it.
+_r = bridge.codex_approve({"request_id": "20", "decision": "allow"})
+assert _sent["rid"] == 20 and _sent["result"] == {"action": "accept", "content": {}}, _sent
+assert _r["sent"]["action"] == "accept" and _r["state"] == "running", _r
+
+# deny -> decline, and no content
+_elicit(21)
+bridge.codex_approve({"request_id": 21, "decision": "deny"})
+assert _sent["result"] == {"action": "decline"}, _sent
+
+# allow_always -> accept, remembered for the session, when the request offered that
+_elicit(22, _meta={"persist": ["session", "always"]})
+_r = bridge.codex_approve({"request_id": 22, "decision": "allow_always"})
+assert _sent["result"] == {"action": "accept", "content": {}, "_meta": {"persist": "session"}}, _sent
+assert "note" not in _r, _r
+# allow_class -> the durable variant codex calls "always"
+_elicit(23, _meta={"persist": ["session", "always"]})
+bridge.codex_approve({"request_id": 23, "decision": "allow_class"})
+assert _sent["result"]["_meta"] == {"persist": "always"}, _sent
+# a mode the request never offered is never sent: plain accept, and the caller is told
+_elicit(24)
+_r = bridge.codex_approve({"request_id": 24, "decision": "allow_always"})
+assert _sent["result"] == {"action": "accept", "content": {}}, _sent
+assert "persist" in _r.get("note", ""), _r
+# always asked for, only session offered -> session, and say so
+_elicit(25, _meta={"persist": "session"})
+_r = bridge.codex_approve({"request_id": 25, "decision": "allow_class"})
+assert _sent["result"]["_meta"] == {"persist": "session"} and "session" in _r.get("note", ""), _r
+
+# a form: grant carries the answers, checked against the schema's required fields
+# BEFORE anything is sent — the request must stay pending so a refused grant is retryable
+_form = {"type": "object", "required": ["project"],
+         "properties": {"project": {"type": "string", "title": "Project"},
+                        "notify": {"type": "boolean", "default": False}}}
+_elicit(26, message="Which project?", requestedSchema=_form)
+_sent.clear()
+try:
+    bridge.codex_approve({"request_id": 26, "decision": "allow"})
+    raise AssertionError("an accept without the required field must be refused")
+except ValueError as e:
+    assert "project" in str(e) and "grant" in str(e), e
+assert not _sent, "nothing may be sent for a refused grant"
+assert [p["request_id"] for p in bridge.pending_for("t20")] == [26], bridge.pending_for("t20")
+try:
+    bridge.codex_approve({"request_id": 26, "decision": "allow", "grant": ["not", "an", "object"]})
+    raise AssertionError("a non-object grant must be refused")
+except ValueError as e:
+    assert "object" in str(e), e
+_r = bridge.codex_approve({"request_id": 26, "decision": "allow",
+                           "grant": '{"project": "bridge", "notify": true}'})   # JSON string form
+assert _sent["result"] == {"action": "accept", "content": {"project": "bridge", "notify": True}}, _sent
+assert bridge.pending_for("t20") == [] and _st["state"] == "running", _st["state"]
+# deny needs no answers, however many fields the form requires
+_elicit(27, requestedSchema=_form)
+bridge.codex_approve({"request_id": 27, "decision": "deny"})
+assert _sent["result"] == {"action": "decline"}, _sent
+
+# a url-mode elicitation exposes the url it wants opened
+bridge.APP._on_server_request({"method": "mcpServer/elicitation/request", "id": 28, "params": {
+    "threadId": "t20", "serverName": "github", "mode": "url", "elicitationId": "e1",
+    "message": "Sign in to continue", "url": "https://example.test/auth"}})
+_view = bridge.codex_poll({"thread": "t20"})["requests"][0]
+assert _view["mode"] == "url" and _view["url"] == "https://example.test/auth", _view
+assert _view["requested_schema"] is None and _view["persist_modes"] == [], _view
+bridge.codex_approve({"request_id": 28, "decision": "allow"})
+assert _sent["result"] == {"action": "accept", "content": {}}, _sent
+
+# an elicitation for a thread the bridge does not track is still declined — in the
+# shape codex defines for THIS request type. {"decision": ...} is a command reply:
+# codex logged it as malformed before falling back to declining anyway.
+bridge.APP._on_server_request({"method": "mcpServer/elicitation/request", "id": 99, "params": {
+    "threadId": "ghost", "serverName": "x", "mode": "form", "message": "?",
+    "requestedSchema": {"type": "object", "properties": {}}}})
+assert _sent["rid"] == 99 and _sent["result"] == {"action": "decline"}, _sent
+# ... and a command for an untracked thread keeps its own shape
+bridge.APP._on_server_request({"method": "item/commandExecution/requestApproval", "id": 98,
+                               "params": {"threadId": "ghost", "command": "x"}})
+assert _sent["result"] == {"decision": "decline"}, _sent
+
+# the caller is told elicitations are approvable, at every decision point
+_approve = next(t for t in bridge.TOOLS if t["name"] == "codex_approve")
+assert "elicitation" in _approve["description"], _approve["description"]
+_props = _approve["inputSchema"]["properties"]
+assert "elicitation" in _props["grant"]["description"].lower(), _props["grant"]
+assert "elicitation" in _props["decision"]["description"].lower(), _props["decision"]
+_approvals = bridge.INSTRUCTIONS.split("APPROVALS:")[1].split("RESULTS:")[0]
+for phrase in ("elicitation", "grant", "persist_modes"):
+    assert phrase in _approvals, f"APPROVALS guidance lost {phrase!r}"
+bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: elicitations accept/decline as decided; forms carry grant; untracked threads still decline")
+
+# --- 0.14.0: codex_capabilities — what codex can do here, before a brief is written -----
+# The inventory is shaped from four app-server answers. The payloads below mirror the real
+# shapes observed on codex-cli 0.153.4 (plugin/installed, skills/list, mcpServerStatus/list,
+# app/installed), trimmed to what the bridge reads.
+_plugins = {"marketplaces": [
+    {"name": "openai-curated-remote", "plugins": [
+        {"name": "deep-research-work", "id": "deep-research-work@openai-curated-remote",
+         "installed": True, "enabled": True,
+         "interface": {"displayName": "Deep Research", "shortDescription": "Deep research",
+                       "longDescription": "Investigate complex questions with cited synthesis."}},
+        {"name": "vercel", "id": "vercel@openai-curated-remote", "installed": True, "enabled": False,
+         "interface": {"displayName": "Vercel", "shortDescription": "Build and deploy web apps"}}]},
+    {"name": "openai-bundled", "plugins": [
+        {"name": "chrome", "id": "chrome@openai-bundled", "installed": True, "enabled": True,
+         "interface": {"displayName": "Chrome", "shortDescription": "Control Chrome with ChatGPT"}}]}],
+    "marketplaceLoadErrors": []}
+_skills = {"data": [{"cwd": "/tmp", "skills": [
+    {"name": "deep-research-work:deep-research", "enabled": True, "scope": "user",
+     "pluginId": "deep-research-work@openai-curated-remote", "path": "/x/SKILL.md",
+     "description": "Use only when the user asks for deep research. Produce a comprehensive, cited artifact."},
+    {"name": "vercel:vercel-queues", "enabled": True, "scope": "user",
+     "pluginId": "vercel@openai-curated-remote", "path": "/y/SKILL.md", "description": "Vercel Queues guidance"},
+    {"name": "imagegen", "enabled": True, "scope": "system", "pluginId": None, "path": "/z/SKILL.md",
+     "description": "Generate or edit raster images"},
+    {"name": "review-agent", "enabled": False, "scope": "system", "pluginId": None, "path": "/w/SKILL.md",
+     "description": "Perform a read-only review"}]}]}
+_mcp = {"data": [
+    {"name": "MCP_DOCKER", "runtimeStatus": None, "pluginId": None,
+     "serverInfo": {"name": "Docker AI MCP Gateway", "version": "2.0.1"},
+     "tools": {"mcp-find": {"name": "mcp-find", "description": "Find MCP servers in the current catalog"},
+               "mcp-add": {"name": "mcp-add", "description": "Add a new MCP server to the session"}}},
+    {"name": "cua_repl", "runtimeStatus": None, "pluginId": "chrome@openai-bundled", "serverInfo": None,
+     "tools": {"js": {"name": "js", "description": "Run JavaScript against the browser"}}},
+    {"name": "computer-use", "runtimeStatus": None, "pluginId": None, "serverInfo": None, "tools": {}}]}
+_apps = {"apps": [{"id": "connector_690a", "runtimeName": "Vercel", "enabled": True, "callable": True},
+                  {"id": "connector_openai_hotline", "runtimeName": "Hotline", "enabled": False, "callable": False}]}
+
+inv = bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps)
+assert "both modes" in inv["network"], inv["network"]
+assert "skills" in inv["how_to_use"], inv["how_to_use"]
+_byid = {p["id"]: p for p in inv["plugins"]}
+_dr = _byid["deep-research-work@openai-curated-remote"]
+assert _dr["name"] == "Deep Research" and _dr["enabled"] is True, _dr
+assert _dr["skills"] == ["deep-research-work:deep-research"], _dr
+assert _byid["vercel@openai-curated-remote"]["enabled"] is False, "a disabled plugin is still listed, flagged"
+assert _byid["vercel@openai-curated-remote"]["skills"] == ["vercel:vercel-queues"], _byid["vercel@openai-curated-remote"]
+assert _byid["chrome@openai-bundled"]["skills"] == [], _byid["chrome@openai-bundled"]
+assert inv["system_skills"] == ["imagegen"], "system skills listed; a disabled skill is not offered: %r" % inv["system_skills"]
+_srv = {s["name"]: s for s in inv["mcp_servers"]}
+assert _srv["MCP_DOCKER"]["tools"] == ["mcp-add", "mcp-find"], _srv["MCP_DOCKER"]
+assert _srv["cua_repl"]["plugin"] == "chrome@openai-bundled", _srv["cua_repl"]
+# a server that lists no tools cannot be used; the map says so instead of showing an empty list
+assert _srv["computer-use"]["tools"] == [] and "no tools" in _srv["computer-use"]["status"], _srv["computer-use"]
+assert _srv["computer-use"]["source"] == "config.toml" and _srv["cua_repl"]["source"] == "plugin", _srv
+# a plugin with no skills still shows what it brings: the servers it provides
+assert _byid["chrome@openai-bundled"]["servers"] == ["cua_repl"], _byid["chrome@openai-bundled"]
+# the bundled surface plugins carry nothing of their own on the wire; the map says what serves them
+_plugins["marketplaces"][1]["plugins"].append(
+    {"name": "computer-use", "id": "computer-use@openai-bundled", "installed": True, "enabled": True,
+     "interface": {"displayName": "Computer Use", "shortDescription": "Control Mac apps from ChatGPT"}})
+_mcp2 = {"data": [dict(_mcp["data"][0]), dict(_mcp["data"][1], pluginId="unified-computer-use@openai-bundled"), _mcp["data"][2]]}
+_inv3 = bridge.capabilities_inventory(_plugins, _skills, _mcp2, _apps)
+_by3 = {p["id"]: p for p in _inv3["plugins"]}
+assert _by3["computer-use@openai-bundled"]["via"] == "cua_repl", _by3["computer-use@openai-bundled"]
+assert "via" not in _by3["deep-research-work@openai-curated-remote"], "a plugin with its own skills needs no via"
+_mcp3 = {"data": [_mcp["data"][0]]}                       # cua_repl absent: say so rather than claim it
+_by4 = {p["id"]: p for p in bridge.capabilities_inventory(_plugins, _skills, _mcp3, _apps)["plugins"]}
+assert _by4["computer-use@openai-bundled"]["via"] == "cua_repl (not running)", _by4["computer-use@openai-bundled"]
+_plugins["marketplaces"][1]["plugins"].pop()
+assert _byid["deep-research-work@openai-curated-remote"]["servers"] == [], _byid["deep-research-work@openai-curated-remote"]
+_apps_out = {a["name"]: a for a in inv["apps"]}
+assert _apps_out["Vercel"]["mention"] == "[$Vercel](app://connector_690a)", _apps_out["Vercel"]
+assert _apps_out["Vercel"]["enabled"] is True and _apps_out["Hotline"]["enabled"] is False, _apps_out
+assert inv["counts"] == {"plugins": 3, "skills": 3, "mcp_servers": 3, "apps": 2}, inv["counts"]
+assert "errors" not in inv, inv
+# descriptions stay out of the default view — it is a map, not a manual
+assert "description" not in json.dumps(inv["plugins"]) and "Generate or edit" not in json.dumps(inv), inv
+
+# a query narrows to matches and brings the descriptions with them
+q = bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps, query="ReSearch")
+assert "plugins" not in q and q["query"] == "ReSearch", q
+_kinds = {(m["kind"], m["name"]) for m in q["matches"]}
+assert ("skill", "deep-research-work:deep-research") in _kinds and ("plugin", "Deep Research") in _kinds, _kinds
+assert not any(m["kind"] == "tool" for m in q["matches"]), q["matches"]
+_skill_match = next(m for m in q["matches"] if m["kind"] == "skill")
+assert _skill_match["name"] == "deep-research-work:deep-research" and "cited artifact" in _skill_match["description"], _skill_match
+assert _skill_match["path"] == "/x/SKILL.md", "a match carries the path codex injects from"
+q2 = bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps, query="find")
+_tool = next(m for m in q2["matches"] if m["kind"] == "tool")
+assert _tool["name"] == "mcp-find" and _tool["server"] == "MCP_DOCKER" and "catalog" in _tool["description"], _tool
+assert bridge.capabilities_inventory(_plugins, _skills, _mcp, _apps, query="zzz-nothing")["matches"] == []
+
+# a failed source is reported, never fatal: the rest of the map still comes back
+inv2 = bridge.capabilities_inventory(_plugins, _skills, _mcp, None, errors={"apps": "app/installed failed"})
+assert inv2["apps"] == [] and inv2["errors"] == {"apps": "app/installed failed"}, inv2
+assert inv2["counts"]["plugins"] == 3, inv2["counts"]
+
+# the tool asks the app-server in the ORDER that matters: remote-marketplace plugins only
+# show their skills in skills/list once plugin/installed has loaded them in that process
+_calls = []
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: _calls.append("ensure")
+def _fake_request(method, params, timeout=120):
+    _calls.append(method)
+    return {"plugin/installed": _plugins, "skills/list": _skills,
+            "mcpServerStatus/list": _mcp, "app/installed": _apps}[method]
+bridge.APP.request = _fake_request
+try:
+    out = bridge.codex_capabilities({})
+    assert _calls[0] == "ensure" and _calls.index("plugin/installed") < _calls.index("skills/list"), _calls
+    assert out["counts"]["skills"] == 3, out["counts"]
+    _calls.clear()
+    def _failing_request(method, params, timeout=120):
+        _calls.append(method)
+        if method == "app/installed":
+            raise bridge.CodexError({"message": "unsupported"})
+        return _fake_request(method, params)
+    bridge.APP.request = _failing_request
+    out = bridge.codex_capabilities({"query": "find"})
+    assert "apps" in out["errors"] and out["matches"], out
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+
+_cap = next(t for t in bridge.TOOLS if t["name"] == "codex_capabilities")
+assert _cap["inputSchema"].get("required", []) == [], _cap["inputSchema"]
+assert "query" in _cap["inputSchema"]["properties"], _cap["inputSchema"]
+# the caller is told to look before briefing, what the important plugins are, and that the
+# network is always there — at the decision points, not just in the README
+for marker in ("CAPABILITIES:", "PLUGINS:", "NETWORK:"):
+    assert marker in bridge.INSTRUCTIONS, f"instructions missing {marker!r}"
+_plug = bridge.INSTRUCTIONS.split("PLUGINS:")[1].split("NETWORK:")[0]
+for phrase in ("deep-research", "codex_capabilities", "Computer Use", "Chrome", "sol", "quota", "markdown", "skills"):
+    assert phrase in _plug, f"PLUGINS guidance lost {phrase!r}"
+assert "both modes" in bridge.INSTRUCTIONS.split("NETWORK:")[1].split("\n")[0]
+print("smoke: capabilities inventory shaped, queried, resilient; app-server asked in the right order")
+
+# --- a follow-up turn that moves the thread reports where it now works -------------
+# A thread starts in scratch, a later turn passes a real cwd: the work lands there, so
+# the result and provenance must say project, not the label from creation time.
+_calls2 = []
+_real_ensure, _real_request, _real_scratch = bridge.APP.ensure, bridge.APP.request, bridge.new_scratch
+_tmp_scratch, _tmp_proj = _tf.mkdtemp(prefix="scratch-"), _tf.mkdtemp(prefix="proj-")
+bridge.new_scratch = lambda: _tmp_scratch
+bridge.APP.ensure = lambda: None
+def _fake_submit_request(method, params, timeout=120):
+    _calls2.append(method)
+    return {"thread/start": {"thread": {"id": "t30"}},
+            "turn/start": {"turn": {"id": f"u{len(_calls2)}"}},
+            # on Windows codex_submit gates every start/resume on the sandbox mode, read
+            # fresh from config/read; answer it, or this section only passes on POSIX
+            "config/read": {"config": {"windows": {"sandbox": "unelevated"}}, "layers": []}}[method]
+bridge.APP.request = _fake_submit_request
+try:
+    r1 = bridge.codex_submit({"prompt": "research it", "model": "sol-high"})
+    assert r1["workspace"] == "scratch" and r1["cwd"] == _tmp_scratch, r1
+    bridge.APP.threads["t30"]["state"] = "completed"          # the research turn finished
+    r2 = bridge.codex_submit({"prompt": "save it", "model": "terra-medium", "thread": "t30", "cwd": _tmp_proj})
+    assert r2["workspace"] == "project" and r2["cwd"] == os.path.realpath(_tmp_proj), r2
+    assert bridge._provenance(bridge.APP.threads["t30"])["workspace"] == "project"
+    bridge.APP.threads["t30"]["state"] = "completed"
+    r3 = bridge.codex_submit({"prompt": "again", "model": "terra-medium", "thread": "t30"})
+    assert r3["workspace"] == "project" and r3["cwd"] == os.path.realpath(_tmp_proj), "no cwd given: stays where it moved to"
+finally:
+    bridge.APP.ensure, bridge.APP.request, bridge.new_scratch = _real_ensure, _real_request, _real_scratch
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: a moved thread reports its real workspace")
+
+# --- explicit skills go on the wire as structured items, resolved from the catalog ----
+# A `$skill` written in the prompt is NOT honoured through the app-server: two live
+# threads answered NONE to "quote the first heading of the skill this mention loaded",
+# while a {type: skill, name, path} input item made the model quote "# Visualize".
+_catalog = [{"name": "deep-research-work:deep-research", "path": "/x/SKILL.md", "enabled": True},
+            {"name": "product-design:index", "path": "/pd/SKILL.md", "enabled": True},
+            {"name": "data-analytics:index", "path": "/da/SKILL.md", "enabled": True},
+            {"name": "imagegen", "path": "/sys/imagegen/SKILL.md", "enabled": True},
+            {"name": "review-agent", "path": "/sys/review/SKILL.md", "enabled": False}]
+_items = bridge.resolve_skills(["deep-research", "$imagegen", "product-design:index"], _catalog)
+assert _items == [{"type": "skill", "name": "deep-research", "path": "/x/SKILL.md"},
+                  {"type": "skill", "name": "imagegen", "path": "/sys/imagegen/SKILL.md"},
+                  {"type": "skill", "name": "index", "path": "/pd/SKILL.md"}], _items
+for bad, needle in (("index", "product-design:index"),          # ambiguous: name the candidates
+                    ("nope", "unknown skill"),                  # unknown: say so
+                    ("review-agent", "disabled")):              # disabled: cannot be injected
+    try:
+        bridge.resolve_skills([bad], _catalog)
+        raise AssertionError(f"{bad!r} must be refused")
+    except ValueError as e:
+        assert needle in str(e), (bad, str(e))
+assert bridge.resolve_skills([], _catalog) == [] and bridge.resolve_skills(None, _catalog) == []
+# and they lead the turn input, before the text and any images
+_in = bridge.build_input("go", [], "/tmp", skills=[{"type": "skill", "name": "x", "path": "/x/SKILL.md"}])
+assert _in[0]["type"] == "skill" and _in[1] == {"type": "text", "text": "go"}, _in
+_sub = next(t for t in bridge.TOOLS if t["name"] == "codex_submit")
+assert "skills" in _sub["inputSchema"]["properties"] and "skills" not in _sub["inputSchema"]["required"]
+# the catalog is fetched in the order that matters and cached per app-server generation
+_calls3 = []
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+def _cat_request(method, params, timeout=120):
+    _calls3.append(method)
+    return {"plugin/installed": {"marketplaces": []},
+            "skills/list": {"data": [{"cwd": "/tmp", "skills": _catalog}]}}[method]
+bridge.APP.request = _cat_request
+try:
+    bridge.APP.skill_catalog_cache = None
+    c1 = bridge.skill_catalog()
+    c2 = bridge.skill_catalog()
+    assert [s["name"] for s in c1] == [s["name"] for s in _catalog], c1
+    assert _calls3 == ["plugin/installed", "skills/list"], _calls3   # once, plugins first
+    assert c2 is c1, "second call must come from the cache"
+    bridge.APP.gen += 1                                           # a restarted child forgets
+    bridge.skill_catalog()
+    assert _calls3 == ["plugin/installed", "skills/list"] * 2, _calls3
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.skill_catalog_cache = None
+print("smoke: explicit skills resolve from the catalog and ride the turn input as structured items")
