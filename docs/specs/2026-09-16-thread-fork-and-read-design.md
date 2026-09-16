@@ -115,9 +115,16 @@ The tool description says, in substance:
 
 ### 2. `codex_poll` reads threads it is not running
 
-Some threads are in the bridge's cache because this process started them, forked
-them, or re-attached them through `codex_submit` or `codex_compact`. Polls of those
-threads behave exactly as today, with live progress, pending approvals and output.
+Some threads are in the bridge's cache under the current app-server generation,
+because this process started them, forked them, or re-attached them through
+`codex_submit` or `codex_compact`. Polls of those threads behave exactly as today,
+with live progress, pending approvals and output.
+
+An entry from an earlier generation is not a thread this child is running. Such an
+entry is left in the cache for `codex_submit`'s existing stale handling, but the child
+that ran it has since restarted. A turn that was active then is already marked failed
+by the reader, and the thread may have been continued elsewhere since. Poll treats
+such an entry like any uncached thread and reads it.
 
 The bridge reads any other thread instead of resuming it, and caches nothing:
 
@@ -134,7 +141,9 @@ The bridge reads any other thread instead of resuming it, and caches nothing:
    - A thread with no turns is `idle`.
 
    Status flags are not used. `thread/read` describes the thread from this process's
-   side, where a thread held elsewhere shows as `notLoaded`.
+   side, where a thread held elsewhere shows as `notLoaded`. The turn is handed to
+   `_adopt_thread_record` without the thread's status, so that helper's active-flag
+   branch never applies to a read.
 4. For a `running` read, `activity.running_seconds` comes from the turn's `startedAt`
    and `activity.quiet_seconds` from the thread's `updatedAt`. When the holder has
    stalled or died, the quiet time keeps growing.
@@ -142,27 +151,28 @@ The bridge reads any other thread instead of resuming it, and caches nothing:
    `forked_from` when the record has a `forkedFromId`, and provenance as today with
    `mode` unknown.
 
-Read failures map as follows:
-
-- `thread not loaded` and `no rollout found` give
-  `unknown thread '<id>': codex has no saved thread with that id`.
-- `invalid session id` gives `'<id>' is not a thread id`.
-- Anything else passes codex's message through.
+A failure of either request, `thread/read` or `thread/turns/list`, goes through the
+classifier in section 3.
 
 A read never attaches. As a result, `codex_poll` does not surface approval requests
 for a thread it is not running; those belong to the process running the turn.
 
 ### 3. Refusals when a thread cannot be taken
 
-A single classifier turns a `CodexError` from `thread/resume`, `thread/fork` or
-`thread/read` into the error the caller sees:
+A single classifier turns a `CodexError` from `thread/resume`, `thread/fork`,
+`thread/read` or `thread/turns/list` into the error the caller sees:
 
-| codex message contains | Error |
-|---|---|
-| `already has an active writer` | `ThreadHeldElsewhere` (a `ValueError`), with the text below |
-| `no rollout found`, `thread not loaded` | `unknown thread '<id>': codex has no saved thread with that id` |
-| `invalid session id` | `'<id>' is not a thread id` |
-| anything else | `codex could not <resume/fork/read> thread '<id>': <codex's message>` |
+| codex message contains | Raised | MCP `outcome` |
+|---|---|---|
+| `already has an active writer` | `ThreadHeldElsewhere` (a `ValueError`), with the text below | `rejected`, plus `reason` |
+| `no rollout found`, `thread not loaded` | `ValueError`: `unknown thread '<id>': codex has no saved thread with that id` | `rejected` |
+| `invalid session id` | `ValueError`: `'<id>' is not a thread id` | `rejected` |
+| anything else | the original `CodexError`, unchanged | `codex_error`, with codex's payload verbatim |
+
+The first three describe the thread or the id the caller passed, so they are refusals.
+Anything else is codex failing, and it reaches the caller exactly as codex said it.
+Today every resume failure becomes `rejected`, so the last row changes the outcome for
+unexpected failures only.
 
 The held-elsewhere text:
 
@@ -178,6 +188,19 @@ error body, next to the existing `outcome` and `thread`. The class subclasses
 unchanged.
 
 After this change, only `codex_submit` and `codex_compact` call `attach_thread`.
+
+Stale entries get the same treatment everywhere. An entry is stale when its `gen`
+differs from `APP.gen`:
+
+- `codex_compact` treats a missing or stale entry the way `codex_submit` does. It
+  drops the entry and re-attaches through `attach_thread` before sending
+  `thread/compact/start`. Today it re-attaches only a missing entry, so a stale one
+  sends compaction to a child that never loaded the thread.
+- `codex_interrupt` on a missing or stale entry sends nothing to codex. It raises a
+  `ValueError`:
+  `thread <id> is not running in this plugin: a turn running in another process has to be stopped there`.
+  Today a missing entry raises `unknown thread`, and a stale one sends `turn/interrupt`
+  for a turn the current child never had.
 
 ### 4. Instructions and docs
 
@@ -215,6 +238,13 @@ These tests run in CI and need no codex binary:
     `codex_submit` to the new id sends `turn/start` without `thread/resume`. When
     `refuse_reason` rejects an inherited cwd, the turn is refused until a `cwd` is
     passed.
+  - A stale-generation entry is read by `codex_poll` (`read_only: true`) rather than
+    answered from the cache. `codex_compact` re-attaches it before
+    `thread/compact/start`. `codex_interrupt` refuses it, and a missing entry, without
+    sending anything to codex.
+  - Unexpected errors from `thread/resume`, `thread/read` and `thread/turns/list` keep
+    MCP outcome `codex_error` with codex's payload. A `thread/turns/list` failure goes
+    through the classifier like a `thread/read` failure.
   - The tools list includes `codex_fork`.
 - `tests/windows_sim.py`: `thread/fork` carries the pinned sandbox mode, as
   `thread/start` does.
