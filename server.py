@@ -961,6 +961,10 @@ def read_thread_state(tid):
     if not turns:
         return st          # no turn yet: idle, as _new_thread_state leaves it
     last = turns[0]
+    # thread/turns/list normalizes an active turn held by another app-server child to
+    # interrupted. A real interruption has completedAt; without it, the turn is live.
+    if last.get("status") == "interrupted" and last.get("completedAt") is None:
+        last = {**last, "status": "inProgress"}
     # The turn alone, without the thread's status, so the active-flag branch cannot fire.
     _adopt_thread_record(st, {"turns": [last]})
     if st["state"] == "running":

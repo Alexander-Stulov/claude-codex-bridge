@@ -825,9 +825,16 @@ try:
     _p = bridge.codex_poll({"thread": "t50"})
     assert _p["state"] == "failed" and _p["error"] == {"message": "boom"}, _p
 
-    bridge.APP.request = _record([_turn("interrupted", "partial")])
+    bridge.APP.request = _record([_turn("interrupted", "partial", completedAt=_now - 5, durationMs=1200)])
     _p = bridge.codex_poll({"thread": "t50"})
     assert _p["state"] == "interrupted" and _p["output"] == "partial", _p
+
+    # app-server normalizes a live turn owned by another process to interrupted without completion
+    bridge.APP.request = _record([_turn("interrupted", completedAt=None, durationMs=None)])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["state"] == "running" and _p["read_only"] is True, _p
+    assert 95 <= _p["activity"]["running_seconds"] <= 110, _p["activity"]
+    assert 35 <= _p["activity"]["quiet_seconds"] <= 50, _p["activity"]
 
     bridge.APP.request = _record([_turn("inProgress")])
     _p = bridge.codex_poll({"thread": "t50"})
