@@ -874,3 +874,76 @@ finally:
     bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
     bridge.APP.threads.clear(); bridge.APP.requests.clear()
 print("smoke: codex_poll reads threads it is not running — states, stale entries, unknown ids")
+
+# --- 0.15.0: codex_fork copies a thread to a new id, and the next turn goes straight on ---
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+_sent = []
+_proj = os.path.realpath(_tf.mkdtemp(prefix="fork-proj-"))
+_GATE = {"config": {"windows": {"sandbox": "unelevated"}}, "layers": []}
+
+def _forking(result_cwd):
+    def fake(method, params, timeout=120):
+        _sent.append((method, params))
+        return {"config/read": _GATE,
+                "thread/fork": {"thread": {"id": "t61", "cwd": result_cwd, "turns": []},
+                                "cwd": result_cwd, "model": "gpt-5.6-sol", "reasoningEffort": "high"},
+                "turn/start": {"turn": {"id": "u61"}}}[method]
+    return fake
+
+try:
+    bridge.APP.request = _forking(_proj)
+    _f = bridge.codex_fork({"thread": "t60"})
+    assert _f == {"thread": "t61", "forked_from": "t60", "state": "idle", "cwd": _proj,
+                  "workspace": "project", "model": "sol-high"}, _f
+    _fp = next(p for m, p in _sent if m == "thread/fork")
+    assert _fp == {"threadId": "t60", "approvalPolicy": "on-request", "approvalsReviewer": "user"} or \
+        (sys.platform == "win32" and _fp.get("config") == {"windows.sandbox": "unelevated"}), _fp
+    assert bridge.APP.threads["t61"]["forked_from"] == "t60" and bridge.APP.threads["t61"]["inherited_cwd"] is True
+    _p = bridge.codex_poll({"thread": "t61"})
+    assert _p["state"] == "idle" and _p["forked_from"] == "t60" and "read_only" not in _p, _p
+    # codex attached this connection to the fork: the next turn needs no resume
+    _sent.clear()
+    _r = bridge.codex_submit({"prompt": "carry on", "model": "sol-high", "thread": "t61"})
+    assert _r["thread"] == "t61" and [m for m, _ in _sent if m != "config/read"] == ["turn/start"], _sent
+
+    # an explicit cwd rides the request, and the fork is not marked inherited
+    _sent.clear()
+    bridge.APP.threads.clear()
+    bridge.codex_fork({"thread": "t60", "cwd": _proj})
+    assert next(p for m, p in _sent if m == "thread/fork")["cwd"] == _proj, _sent
+    assert bridge.APP.threads["t61"]["inherited_cwd"] is False
+
+    # a copied cwd the bridge would refuse holds the next turn until cwd moves it
+    bridge.APP.threads.clear()
+    _home = os.path.realpath(os.path.expanduser("~"))
+    bridge.APP.request = _forking(_home)
+    bridge.codex_fork({"thread": "t60"})
+    try:
+        bridge.codex_submit({"prompt": "go", "model": "sol-high", "thread": "t61"})
+        raise AssertionError("a fork working in the home directory must be held")
+    except ValueError as e:
+        assert "forked thread t61 works in" in str(e) and "Pass cwd to move it" in str(e), e
+    _r = bridge.codex_submit({"prompt": "go", "model": "sol-high", "thread": "t61", "cwd": _proj})
+    assert _r["cwd"] == _proj, _r
+
+    # fork errors are classified like resume errors; a missing thread is refused before codex
+    def _no_such(method, params, timeout=120):
+        if method == "config/read":
+            return _GATE
+        raise bridge.CodexError({"code": -32600, "message": "no rollout found for thread id t60"})
+    bridge.APP.request = _no_such
+    try:
+        bridge.codex_fork({"thread": "t60"})
+        raise AssertionError("an unknown source must be refused")
+    except ValueError as e:
+        assert "unknown thread 't60'" in str(e), e
+    try:
+        bridge.codex_fork({"thread": " "})
+        raise AssertionError("a blank thread must be refused")
+    except ValueError as e:
+        assert "thread is required" in str(e), e
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: codex_fork copies to a new id, the next turn needs no resume, an inherited cwd is held")

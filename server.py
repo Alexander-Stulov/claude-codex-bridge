@@ -1243,13 +1243,15 @@ def codex_submit(args):
                 with APP.lock:
                     APP.threads.pop(tid, None)     # so attach_thread claims it afresh
             st = attach_thread(tid, cwd_override, mode=mode, model_slug=model_slug)
-        if st.get("resumed") and not args.get("cwd"):
-            # A resumed thread's cwd is whatever another client chose for it. Hold it to
-            # the same rule as a thread the bridge starts — before steering or a new turn
-            # sends more work there. Inspection and interruption stay available.
+        if (st.get("resumed") or st.get("inherited_cwd")) and not args.get("cwd"):
+            # A resumed thread's cwd is whatever another client chose for it, and a fork's is
+            # copied from the thread it came from. Hold both to the same rule as a thread the
+            # bridge starts — before steering or a new turn sends more work there.
+            # Inspection and interruption stay available.
             reason = refuse_reason(os.path.realpath(st["cwd"]))
             if reason:
-                raise ValueError(f"resumed thread {tid} works in {st['cwd']}: {reason}. Pass cwd to move it.")
+                label = "resumed thread" if st.get("resumed") else "forked thread"
+                raise ValueError(f"{label} {tid} works in {st['cwd']}: {reason}. Pass cwd to move it.")
         if st["state"] == "awaiting_approval":
             ids = [p["request_id"] for p in pending_for(tid)]
             raise ValueError(f"thread {tid} is waiting on approval request(s) {ids} — "
@@ -1587,9 +1589,43 @@ def codex_compact(args):
 
 
 def codex_fork(args):
-    """Stand-in until the fork itself lands: the tool goes on the surface first, so the
-    manifest, schema and guidance are checked before anything is built behind them."""
-    raise ValueError("codex_fork is not available in this build yet")
+    """Copy a thread's saved history to a new thread id, cached like a thread this bridge
+    started. codex takes the writer lock on the NEW id only, so this works while another
+    process holds the original: the way to keep working on a thread codex_submit refused
+    as held_elsewhere. codex also attaches this connection to the fork, so a turn on it
+    needs no resume. Saved, not ephemeral: the new id is a handle that lasts."""
+    tid = args.get("thread")
+    if not tid or not str(tid).strip():
+        raise ValueError("thread is required: the id of the thread to copy")
+    APP.ensure()
+    params = {"threadId": tid, "approvalPolicy": "on-request", "approvalsReviewer": "user"}
+    explicit = None
+    if args.get("cwd"):
+        explicit = resolve_workspace(args["cwd"])[0]
+        params["cwd"] = explicit
+    pinned = windows_gate()
+    if pinned:
+        # a fork is a new thread: bind the verified sandbox mode to it, as thread/start does
+        params["config"] = {"windows.sandbox": pinned}
+    try:
+        res = APP.request("thread/fork", params, timeout=120)
+    except CodexError as e:
+        raise thread_access_error(tid, e) from None
+    thread = res.get("thread") or {}
+    new_id = thread.get("id")
+    if not new_id:
+        raise CodexError({"message": "thread/fork returned no thread id", "result": res})
+    cwd = explicit or res.get("cwd") or thread.get("cwd") or SCRATCH_ROOT
+    kind = "scratch" if str(cwd).startswith(SCRATCH_ROOT) else "project"
+    slug = WIRE_TO_SLUG.get((res.get("model"), res.get("reasoningEffort")), res.get("model"))
+    st = _new_thread_state(new_id, cwd, None, slug, kind)
+    st["forked_from"] = tid
+    # The copied cwd is whatever the original's client chose: codex_submit holds it to the
+    # resumed-thread rule until a turn passes cwd.
+    st["inherited_cwd"] = explicit is None
+    with APP.lock:
+        APP.threads[new_id] = st
+    return {"thread": new_id, "forked_from": tid, "state": "idle", "cwd": cwd, "workspace": kind, "model": slug}
 
 
 TOOLS = [
