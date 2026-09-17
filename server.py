@@ -935,6 +935,40 @@ def _adopt_thread_record(st, thread):
                                     f"so the final message was not loaded")
 
 
+def read_thread_state(tid):
+    """A thread this app-server child is not running, rebuilt from codex's saved record.
+
+    Read, never resumed: resuming takes codex's writer lock, and this bridge keeps what it
+    takes for as long as it runs, so a poll alone would lock every other process out of
+    the thread. Never cached, so the next poll reads fresh. thread/read describes the
+    thread from this process's side, where a thread open elsewhere is notLoaded, so its
+    status flags say nothing about a live turn: the state is the last turn's own."""
+    APP.ensure()
+    try:
+        res = APP.request("thread/read", {"threadId": tid, "includeTurns": False}, timeout=60)
+        page = APP.request("thread/turns/list", {"threadId": tid, "limit": 1, "sortDirection": "desc",
+                                                 "itemsView": "full"}, timeout=60)
+    except CodexError as e:
+        raise thread_access_error(tid, e) from None
+    thread = res.get("thread") or {}
+    cwd = thread.get("cwd") or SCRATCH_ROOT
+    slug = WIRE_TO_SLUG.get((thread.get("model"), thread.get("reasoningEffort")), thread.get("model"))
+    st = _new_thread_state(tid, cwd, None, slug, "scratch" if str(cwd).startswith(SCRATCH_ROOT) else "project")
+    forked_from = thread.get("forkedFromId")
+    if forked_from:
+        st["forked_from"] = forked_from
+    turns = page.get("data") or []
+    if not turns:
+        return st          # no turn yet: idle, as _new_thread_state leaves it
+    last = turns[0]
+    # The turn alone, without the thread's status, so the active-flag branch cannot fire.
+    _adopt_thread_record(st, {"turns": [last]})
+    if st["state"] == "running":
+        st["started_at"] = last.get("startedAt") or st["started_at"]
+        st["changed_at"] = thread.get("updatedAt") or st["changed_at"]
+    return st
+
+
 def prune_threads():
     """A finished thread is a cache. Keep it briefly so a lost poll can be retried,
     then let it go — codex still has it, and thread/resume brings it back."""
@@ -1295,12 +1329,13 @@ def codex_submit(args):
 
 def codex_poll(args):
     tid = args.get("thread")
-    with APP.lock:
-        st = APP.threads.get(tid)
-    if st is None:
-        # Pruned from the local cache, or left over from a previous bridge process.
-        # codex is the store, so attach rather than lose hours of work to a cache expiry.
-        st = attach_thread(tid)
+    st = _live_entry(tid)
+    read_only = st is None
+    if read_only:
+        # Never seen, pruned, or held over from an earlier app-server child: read what
+        # codex has saved instead of attaching, so polling never takes the thread from
+        # whichever process has it open.
+        st = read_thread_state(tid)
     with APP.lock:
         # Everything here repeats on every poll: nothing is consumed, so a lost or
         # duplicated poll costs nothing and there are no pieces to reassemble.
@@ -1325,9 +1360,13 @@ def codex_poll(args):
         if runway is not None:
             activity["context"] = runway
         out = {"thread": tid, "state": state, "activity": activity}
-        if st.get("resumed"):
+        if read_only:
+            out["read_only"] = True
+        elif st.get("resumed"):
             # the bridge re-attached to an existing thread rather than creating it
             out["resumed"] = True
+        if st.get("forked_from"):
+            out["forked_from"] = st["forked_from"]
         if state == "awaiting_approval":
             out["requests"] = pending_for(tid)          # derived; may be more than one
             out["thread_scope"] = {"mode": st["mode"], "cwd": st["cwd"]}

@@ -99,9 +99,9 @@ b = Bridge()
 chk = b.call("codex_check", {})
 assert t not in [x["thread"] for x in chk["threads"]], "new bridge already knows the thread — not a recovery test"
 rec = b.call("codex_poll", {"thread": t})
-print(f"   resumed={rec.get('resumed')} state={rec['state']} "
+print(f"   read_only={rec.get('read_only')} state={rec['state']} "
       f"cwd={(rec.get('provenance') or {}).get('cwd')}")
-assert rec.get("resumed") is True, "poll answered without marking the result as recovered"
+assert rec.get("read_only") is True, "poll answered without marking the result as read from codex's record"
 assert rec["state"] == "completed", rec
 assert isinstance(rec["output"], dict), f"recovered output came back as {type(rec['output']).__name__}, " \
                                         f"not the object the first poll returned"
@@ -110,14 +110,16 @@ assert os.path.realpath((rec.get("provenance") or {}).get("cwd", "")) == os.path
     f"recovery invented a cwd instead of reading the thread's own: {rec.get('provenance')}"
 print(f"   PASS recovered {len(rec['output']['lines'])} lines identically, from codex's record alone")
 
-print("== I2 an unknown thread id must fail clearly, not silently")
-try:
-    b.call("codex_poll", {"thread": "thr_does_not_exist_0000"})
-    print("   FAIL: polling a nonexistent thread returned success")
-    sys.exit(1)
-except RuntimeError as e:
-    assert "unknown thread" in str(e), str(e)[:200]
-    print("   PASS clear error for a genuinely unknown thread")
+print("== I2 an unknown thread id, or no thread id at all, must fail clearly, not silently")
+for bogus, needle in (("01a0ffff-0000-7000-8000-000000000000", "unknown thread"),
+                      ("thr_does_not_exist_0000", "is not a thread id")):
+    try:
+        b.call("codex_poll", {"thread": bogus})
+        print(f"   FAIL: polling {bogus} returned success")
+        sys.exit(1)
+    except RuntimeError as e:
+        assert needle in str(e), str(e)[:200]
+print("   PASS clear errors for a well-formed unknown id and a malformed one")
 
 print("\nALL LIVENESS + RECOVERY TESTS PASSED")
 b.p.terminate()

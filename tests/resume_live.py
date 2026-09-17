@@ -8,7 +8,7 @@ later — next day, next week, after Desktop restarted and the bridge process is
                             adds a turn that still has the earlier context
   Q  honest provenance    — the resumed thread reports the model/mode it ACTUALLY ran
                             with, read from codex, never a fabricated default
-  R  poll-then-continue   — polling first (which attaches) then submitting works, and
+  R  poll-then-continue   — polling first (which only reads) then submitting works, and
                             the thread is not duplicated or relocated
 """
 import json, os, subprocess, sys, tempfile, threading, time
@@ -102,30 +102,31 @@ assert prov["mode"] == "write", f"reported mode={prov['mode']}, not the sandbox 
 b.p.terminate(); b.p.wait(timeout=20)
 time.sleep(1)
 
-print("== Q2 attach WITHOUT being told the model: must read it off codex, not default")
+print("== Q2 read WITHOUT being told the model: must read it off codex, not default")
 c = Bridge()
 peek = c.call("codex_poll", {"thread": t})
-print(f"   poll-only attach -> resumed={peek.get('resumed')} state={peek['state']} "
+print(f"   poll-only read -> read_only={peek.get('read_only')} state={peek['state']} "
       f"model={(peek.get('provenance') or {}).get('model_slug')} "
       f"mode={(peek.get('provenance') or {}).get('mode')}")
-assert peek.get("resumed") is True, peek
+assert peek.get("read_only") is True and "resumed" not in peek, peek
+assert t not in [x["thread"] for x in c.call("codex_check", {})["threads"]], "a poll must not attach the thread"
 pv = peek.get("provenance") or {}
 assert pv.get("model_slug") != "luna-medium" or "terra" in str(pv.get("model")), \
     f"attach fabricated a default model instead of reading it: {pv}"
 # mode is NOT inferable: thread/resume reports the thread's stored sandbox (readOnly by
 # default) while every turn carries its own sandboxPolicy. Unknown beats fabricated.
 assert pv.get("mode") is None, \
-    f"attach claimed mode={pv.get('mode')!r}; it cannot know, and must not guess"
+    f"the read claimed mode={pv.get('mode')!r}; it cannot know, and must not guess"
 print("   PASS model read from codex; mode reported as unknown rather than fabricated")
 
-print("== R  poll-then-continue on the same attached thread")
+print("== R  poll-then-continue: codex_submit attaches the thread a poll only read")
 r3 = c.call("codex_submit", {"prompt": "Say STILL-HERE.", "model": "terra-high", "thread": t, "mode": "write"})
 assert os.path.realpath(r3["cwd"]) == os.path.realpath(repo), r3["cwd"]
 st3 = c.wait(t)
 assert st3["state"] == "completed" and "STILL-HERE" in str(st3["output"]).upper(), st3
 live = [x["thread"] for x in c.call("codex_check", {})["threads"]]
 assert live.count(t) == 1, f"thread duplicated in the table: {live}"
-print(f"   PASS continued after a poll-attach; one entry in the table, cwd unchanged")
+print(f"   PASS continued after a read-only poll; one entry in the table, cwd unchanged")
 
 print("\nALL RESUME TESTS PASSED")
 c.p.terminate()

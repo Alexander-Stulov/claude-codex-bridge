@@ -785,3 +785,92 @@ finally:
     bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
     bridge.APP.threads.clear(); bridge.APP.requests.clear()
 print("smoke: refusals are classified; stale entries re-attach before compaction and are never interrupted")
+
+# --- 0.15.0: codex_poll reads a thread it is not running, and never takes it ------------
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+_sent = []
+_now = int(time.time())
+
+def _record(turns, **thread):
+    base = {"id": "t50", "cwd": "/tmp", "model": "gpt-5.6-terra", "reasoningEffort": "high",
+            "status": {"type": "notLoaded"}, "updatedAt": _now - 40, "forkedFromId": None, "turns": []}
+    base.update(thread)
+    def fake(method, params, timeout=120):
+        _sent.append(method)
+        if method == "thread/read":
+            assert params == {"threadId": "t50", "includeTurns": False}, params
+            return {"thread": base}
+        if method == "thread/turns/list":
+            assert params == {"threadId": "t50", "limit": 1, "sortDirection": "desc", "itemsView": "full"}, params
+            return {"data": turns, "nextCursor": None}
+        raise AssertionError(f"a read-only poll sent {method}")
+    return fake
+
+def _turn(status, text=None, **extra):
+    items = [{"type": "agentMessage", "id": "i1", "text": text}] if text is not None else []
+    return {"id": "u9", "status": status, "items": items, "itemsView": "full", "durationMs": 1200,
+            "startedAt": _now - 100, "completedAt": None, "error": None, **extra}
+
+try:
+    bridge.APP.request = _record([_turn("completed", '{"verdict": "ok"}')], forkedFromId="t49")
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["read_only"] is True and "resumed" not in _p, _p
+    assert _p["state"] == "completed" and _p["output"] == {"verdict": "ok"}, _p       # structured, as a live poll
+    assert _p["forked_from"] == "t49" and _p["provenance"]["model_slug"] == "terra-high", _p
+    assert _p["provenance"]["mode"] is None and _p["provenance"]["cwd"] == "/tmp", _p["provenance"]
+    assert "t50" not in bridge.APP.threads, "a read must not cache the thread"
+
+    bridge.APP.request = _record([_turn("failed", error={"message": "boom"})])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["state"] == "failed" and _p["error"] == {"message": "boom"}, _p
+
+    bridge.APP.request = _record([_turn("interrupted", "partial")])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["state"] == "interrupted" and _p["output"] == "partial", _p
+
+    bridge.APP.request = _record([_turn("inProgress")])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["state"] == "running" and _p["read_only"] is True, _p
+    assert 95 <= _p["activity"]["running_seconds"] <= 110, _p["activity"]      # from the turn's startedAt
+    assert 35 <= _p["activity"]["quiet_seconds"] <= 50, _p["activity"]         # from the thread's updatedAt
+
+    bridge.APP.request = _record([])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["state"] == "idle" and "output" not in _p, _p
+
+    # an entry held over from an earlier app-server child is read, not answered from the cache
+    _old = bridge._new_thread_state("t50", "/tmp", "write", "luna-medium")
+    _old.update(state="failed", error={"message": "app-server exited while the turn was active"},
+                gen=bridge.APP.gen - 1)
+    bridge.APP.threads["t50"] = _old
+    bridge.APP.request = _record([_turn("completed", "done elsewhere")])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["read_only"] is True and _p["state"] == "completed" and _p["output"] == "done elsewhere", _p
+    assert "thread/resume" not in _sent, _sent
+
+    # ids codex has no record of, or that are not ids at all, are named as such
+    for _message, _needle in (("thread not loaded: t50", "unknown thread 't50'"),
+                              ("invalid thread id: invalid character", "'t50' is not a thread id")):
+        def _missing(method, params, timeout=120, _message=_message):
+            raise bridge.CodexError({"code": -32600, "message": _message})
+        bridge.APP.request = _missing
+        try:
+            bridge.codex_poll({"thread": "t50"})
+            raise AssertionError(_message)
+        except ValueError as e:
+            assert _needle in str(e), e
+
+    # a turns/list failure codex did not explain is codex's own error, verbatim
+    def _list_breaks(method, params, timeout=120):
+        if method == "thread/read":
+            return {"thread": {"id": "t50", "cwd": "/tmp"}}
+        raise bridge.CodexError({"code": -32603, "message": "turn store unavailable"})
+    bridge.APP.request = _list_breaks
+    _resp = bridge.handle({"method": "tools/call", "params": {"name": "codex_poll", "arguments": {"thread": "t50"}}})
+    _body = json.loads(_resp["content"][0]["text"])
+    assert _body["outcome"] == "codex_error" and _body["error"]["message"] == "turn store unavailable", _body
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: codex_poll reads threads it is not running — states, stale entries, unknown ids")
