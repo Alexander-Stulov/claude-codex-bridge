@@ -26,7 +26,7 @@
 - **Spec amended, approved by the owner on 2026-09-16:** `invalid thread id`. On codex-cli 0.154.0, `thread/read` and `thread/turns/list` report a malformed id with that text, while `thread/fork` and `thread/resume` use `invalid session id`. The spec's table now lists both.
 
 **Wire parameters and markers**
-- `thread/fork` params are `threadId`, `approvalPolicy: "on-request"` and `approvalsReviewer: "user"`, plus `cwd` when given and `config: {"windows.sandbox": <mode>}` when the Windows gate pins a mode. The fork is saved, never ephemeral.
+- `thread/fork` params are `threadId`, `approvalPolicy: "on-request"` and `approvalsReviewer: "user"`, plus the source's `model` and `modelProvider` (read first with `thread/read`), `cwd` when given, and `config` holding `model_reasoning_effort` from the source and `windows.sandbox` when the Windows gate pins a mode. The fork is saved, never ephemeral.
 - The read path sends `thread/read` with `{"threadId": <id>, "includeTurns": false}`, then `thread/turns/list` with `{"threadId": <id>, "limit": 1, "sortDirection": "desc", "itemsView": "full"}`. A read never sends `thread/resume` and never caches.
 - Poll answers from the read path carry `read_only: true` and never `resumed`. A poll answer carries `forked_from` whenever it is known. The MCP error body for a held thread carries `"reason": "held_elsewhere"`.
 - A cache entry is live only when `st["gen"] == APP.gen`.
