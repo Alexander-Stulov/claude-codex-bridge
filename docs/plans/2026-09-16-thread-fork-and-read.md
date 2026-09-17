@@ -83,7 +83,7 @@ They are one component, so there are no cross-slice boundaries.
 
 ## Integration
 
-The controller runs integration after Task 7, from the repository root.
+The controller runs integration after Task 8, from the repository root.
 
 **CI suite** (no codex needed):
 
@@ -1960,4 +1960,254 @@ Do not run `tests/fork_live.py`: the controller runs it at integration.
 ```bash
 git add server.py tests/smoke.py tests/fork_live.py docs/release-notes/v0.15.0.md
 git commit --only -m "Read a fork's frozen turn as interrupted and this bridge's own crashed turn as failed" -- server.py tests/smoke.py tests/fork_live.py docs/release-notes/v0.15.0.md
+```
+
+
+---
+
+### Task 8: A fork keeps its source's model; a compaction counts once
+
+**Phase:** build
+**Slice:** thread-access
+**Depends on:** Task 4, Task 7 (added after testing the installed extension, approved by the owner 2026-09-16)
+
+**Why:** two problems surfaced when the installed 0.15.0 extension was tested:
+- **Fork model.** A fork took codex's default model (`gpt-6-astra`, `xhigh`) instead of its source's (`gpt-5.6-luna`, `medium`), because `thread/fork` was sent without a model. Verified live: passing `model`, `modelProvider` and `config.model_reasoning_effort` makes the fork keep the source's values.
+- **Compaction count.** `activity.compactions` read 2 after one compaction. codex sends the single `contextCompaction` item twice, as `item/started` and then `item/completed`, and `_push_item` counted both. This bug predates the branch.
+
+**Files:**
+- Modify: `server.py`
+  - `codex_fork`: read the source and pass its model fields
+  - `AppServer._push_item`: the `contextCompaction` branch
+- Modify: `tests/context_live.py`, stage V
+- Modify: `docs/release-notes/v0.15.0.md`
+- Test: `tests/smoke.py`
+  - the codex_fork section's fake and first assertions
+  - a new section appended at the end
+
+**Interfaces:**
+- Consumes: `thread_access_error` (Task 2), `codex_fork` (Task 4).
+- Produces:
+  - `codex_fork` sends `thread/read` before `thread/fork`, and passes `model`, `modelProvider` and `config.model_reasoning_effort` from the source.
+  - `activity.compactions` counts one per completed compaction.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/smoke.py`, replace:
+
+```python
+def _forking(result_cwd):
+    def fake(method, params, timeout=120):
+        _sent.append((method, params))
+        return {"config/read": _GATE,
+                "thread/fork": {"thread": {"id": "t61", "cwd": result_cwd, "turns": []},
+                                "cwd": result_cwd, "model": "gpt-5.6-sol", "reasoningEffort": "high"},
+                "turn/start": {"turn": {"id": "u61"}}}[method]
+    return fake
+```
+
+with:
+
+```python
+_SOURCE = {"id": "t60", "model": "gpt-5.6-luna", "reasoningEffort": "medium", "modelProvider": "openai"}
+
+def _forking(result_cwd):
+    def fake(method, params, timeout=120):
+        _sent.append((method, params))
+        if method == "thread/fork":
+            # codex gives the fork the model it is asked for, and its own default otherwise
+            return {"thread": {"id": "t61", "cwd": result_cwd, "turns": []}, "cwd": result_cwd,
+                    "model": params.get("model", "gpt-6-astra"),
+                    "reasoningEffort": (params.get("config") or {}).get("model_reasoning_effort", "xhigh")}
+        return {"config/read": _GATE, "thread/read": {"thread": _SOURCE},
+                "turn/start": {"turn": {"id": "u61"}}}[method]
+    return fake
+```
+
+In `tests/smoke.py`, replace:
+
+```python
+    _f = bridge.codex_fork({"thread": "t60"})
+    assert _f == {"thread": "t61", "forked_from": "t60", "state": "idle", "cwd": _proj,
+                  "workspace": "project", "model": "sol-high"}, _f
+    _fp = next(p for m, p in _sent if m == "thread/fork")
+    assert _fp == {"threadId": "t60", "approvalPolicy": "on-request", "approvalsReviewer": "user"} or \
+        (sys.platform == "win32" and _fp.get("config") == {"windows.sandbox": "unelevated"}), _fp
+```
+
+with:
+
+```python
+    _f = bridge.codex_fork({"thread": "t60"})
+    # the fork keeps the model, provider and effort its source ran on, not codex's default
+    assert _f == {"thread": "t61", "forked_from": "t60", "state": "idle", "cwd": _proj,
+                  "workspace": "project", "model": "luna-medium"}, _f
+    assert ("thread/read", {"threadId": "t60", "includeTurns": False}) in _sent, _sent
+    _fp = next(p for m, p in _sent if m == "thread/fork")
+    _config = {"model_reasoning_effort": "medium"}
+    if sys.platform == "win32":
+        _config["windows.sandbox"] = "unelevated"
+    assert _fp == {"threadId": "t60", "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                   "model": "gpt-5.6-luna", "modelProvider": "openai", "config": _config}, _fp
+```
+
+Append at the end of `tests/smoke.py`:
+
+```python
+# --- a compaction is counted once, when it completes ---------------------------------
+# codex sends the one contextCompaction item twice, item/started then item/completed
+# (observed live 2026-09-16); counting both made one codex_compact read as compactions 2.
+_st = bridge._new_thread_state("t90", "/tmp", "write", "luna-medium")
+bridge.APP._push_item(_st, {"type": "contextCompaction", "id": "c1"}, False)
+assert _st["activity"]["now"] == "compacting context" and "compactions" not in _st["activity"], _st["activity"]
+bridge.APP._push_item(_st, {"type": "contextCompaction", "id": "c1"}, True)
+assert _st["activity"]["compactions"] == 1, _st["activity"]
+print("smoke: a compaction is counted once, when it completes")
+```
+
+In `tests/context_live.py`, replace:
+
+```python
+assert st2["state"] in ("completed", "interrupted"), st2
+```
+
+with:
+
+```python
+assert st2["state"] in ("completed", "interrupted"), st2
+assert act2.get("compactions") == 1, f"one codex_compact must count one compaction: {act2}"
+```
+
+- [ ] **Step 2: Run the smoke test to verify it fails**
+
+Run: `python3 tests/smoke.py`
+Expected: FAIL with `AssertionError` on the fork answer, whose `model` is `astra-xhigh` instead of `luna-medium`. After that assertion is fixed, the compaction section fails on `"compactions" not in _st["activity"]`.
+
+- [ ] **Step 3: Carry the source's model into the fork**
+
+In `server.py` `codex_fork`, replace:
+
+```python
+    APP.ensure()
+    params = {"threadId": tid, "approvalPolicy": "on-request", "approvalsReviewer": "user"}
+    explicit = None
+```
+
+with:
+
+```python
+    APP.ensure()
+    # thread/fork without a model gives the fork codex's configured default, not the model
+    # the original ran on. Read the source (no lock taken) and carry its model over.
+    try:
+        source = APP.request("thread/read", {"threadId": tid, "includeTurns": False}, timeout=60).get("thread") or {}
+    except CodexError as e:
+        raise thread_access_error(tid, e) from None
+    params = {"threadId": tid, "approvalPolicy": "on-request", "approvalsReviewer": "user"}
+    config = {}
+    if source.get("model"):
+        params["model"] = source["model"]
+    if source.get("modelProvider"):
+        params["modelProvider"] = source["modelProvider"]
+    if source.get("reasoningEffort"):
+        config["model_reasoning_effort"] = source["reasoningEffort"]
+    explicit = None
+```
+
+In `server.py` `codex_fork`, replace:
+
+```python
+    pinned = windows_gate()
+    if pinned:
+        # a fork is a new thread: bind the verified sandbox mode to it, as thread/start does
+        params["config"] = {"windows.sandbox": pinned}
+```
+
+with:
+
+```python
+    pinned = windows_gate()
+    if pinned:
+        # a fork is a new thread: bind the verified sandbox mode to it, as thread/start does
+        config["windows.sandbox"] = pinned
+    if config:
+        params["config"] = config
+```
+
+- [ ] **Step 4: Count a compaction once**
+
+In `server.py` `AppServer._push_item`, replace:
+
+```python
+            # earlier turns still exist, but as a summary rather than verbatim.
+            self._note(st, now="compacting context", compactions=1)
+```
+
+with:
+
+```python
+            # earlier turns still exist, but as a summary rather than verbatim. codex sends
+            # the one compaction item twice, started then completed: count it once.
+            if completed:
+                self._note(st, compactions=1)
+            else:
+                self._note(st, now="compacting context")
+```
+
+- [ ] **Step 5: Update the release notes**
+
+In `docs/release-notes/v0.15.0.md`, replace:
+
+```
+A fork keeps the original's working directory unless `cwd` is passed, and that
+directory is held to the same rule as a resumed thread's.
+```
+
+with:
+
+```
+A fork keeps the original's working directory unless `cwd` is passed, and that
+directory is held to the same rule as a resumed thread's. It also keeps the model,
+provider and reasoning effort the original ran on, where codex would otherwise give
+it its default model.
+```
+
+In `docs/release-notes/v0.15.0.md`, replace:
+
+```
+## Also in this release
+
+```
+
+with:
+
+```
+## Also in this release
+
+- `activity.compactions` counted every compaction twice, because codex sends the
+  compaction item once as started and again as completed. It now counts one per
+  compaction, when it completes.
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run:
+```bash
+python3 -m py_compile server.py tests/context_live.py
+python3 tests/smoke.py
+python3 tests/protocol_conformance.py
+python3 tests/windows_sim.py
+```
+Expected:
+- all exit 0
+- `smoke.py` prints `smoke: a compaction is counted once, when it completes`
+- `windows_sim.py` still prints `windows_sim: thread/fork pin ok`
+
+Do not run `tests/context_live.py`: the controller runs it.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add server.py tests/smoke.py tests/context_live.py docs/release-notes/v0.15.0.md
+git commit --only -m "Keep the source's model on a fork; count a compaction once" -- server.py tests/smoke.py tests/context_live.py docs/release-notes/v0.15.0.md
 ```

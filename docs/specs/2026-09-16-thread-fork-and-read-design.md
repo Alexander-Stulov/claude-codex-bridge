@@ -95,19 +95,28 @@ Flow:
 1. Call `APP.ensure()`, then `windows_gate()`. If the gate pins a Windows sandbox
    mode, the request carries it as `config: {"windows.sandbox": <mode>}`, the same way
    `thread/start` does.
-2. Send `thread/fork` with `threadId`, `approvalPolicy: "on-request"`,
-   `approvalsReviewer: "user"`, and `cwd` when one was given. The fork is saved rather
-   than ephemeral, so its id is a durable handle.
-3. Take the new id from `result.thread.id`. A missing id is a `CodexError`, as it is
+2. Read the source thread with `thread/read` (`includeTurns: false`), which takes no lock.
+   A failure goes through the classifier in section 3.
+3. Send `thread/fork` with these fields:
+   - `threadId`, `approvalPolicy: "on-request"` and `approvalsReviewer: "user"`
+   - the source's `model` and `modelProvider`
+   - its reasoning effort as `config.model_reasoning_effort`
+   - `cwd` when one was given
+
+   The fork is saved rather than ephemeral, so its id is a durable handle. Without the
+   model fields, codex gives the fork its configured default model (`gpt-6-astra`,
+   `xhigh` on this machine) instead of the one the original ran on. Verified live on
+   2026-09-16, and approved by the owner.
+4. Take the new id from `result.thread.id`. A missing id is a `CodexError`, as it is
    for `thread/start`.
-4. Cache the fork like a thread the bridge started, with these fields:
+5. Cache the fork like a thread the bridge started, with these fields:
    - state `idle`, with no turn
    - mode unknown until the first turn sets it
    - `forked_from` set to the source id
    - model slug from (`result.model`, `result.reasoningEffort`) through `WIRE_TO_SLUG`
    - cwd from the argument, falling back to `result.cwd` and then `result.thread.cwd`
    - marked `inherited_cwd` when no `cwd` was passed
-5. Return `{thread, forked_from, state: "idle", cwd, workspace, model}`. Every later
+6. Return `{thread, forked_from, state: "idle", cwd, workspace, model}`. Every later
    `codex_poll` of the fork also carries `forked_from`.
 
 A `codex_submit` to the new id goes straight to `turn/start`. Two things make that
