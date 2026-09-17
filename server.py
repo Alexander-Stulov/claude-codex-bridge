@@ -935,6 +935,39 @@ def _adopt_thread_record(st, thread):
                                     f"so the final message was not loaded")
 
 
+def _copied_at_fork(thread, turn):
+    """Whether this thread's turn is a copy its fork took from the source, rather than the
+    fork's own. codex saves times in whole seconds: a turn that started before the fork
+    existed is a copy, and one that started after it is the fork's own. A turn that started
+    in the very second the fork was made is a copy exactly when the source thread has a turn
+    with the same id, because a fork keeps the ids of the turns it copies. When the source
+    cannot be read, the turn counts as the fork's own."""
+    source = thread.get("forkedFromId")
+    if not source:
+        return False
+    started, created = turn.get("startedAt"), thread.get("createdAt") or 0
+    if started is None or started < created:
+        return True
+    if started > created:
+        return False
+    cursor = None
+    try:
+        while True:
+            params = {"threadId": source, "limit": 20, "sortDirection": "desc", "itemsView": "notLoaded"}
+            if cursor:
+                params["cursor"] = cursor
+            page = APP.request("thread/turns/list", params, timeout=60)
+            rows = page.get("data") or []
+            if any(row.get("id") == turn.get("id") for row in rows):
+                return True
+            cursor = page.get("nextCursor")
+            # Newest first: once a page reaches turns older than the fork, the copy is not there.
+            if not cursor or not rows or (rows[-1].get("startedAt") or 0) < created:
+                return False
+    except CodexError:
+        return False
+
+
 def read_thread_state(tid):
     """A thread this app-server child is not running, rebuilt from codex's saved record.
 
@@ -961,10 +994,15 @@ def read_thread_state(tid):
     if not turns:
         return st          # no turn yet: idle, as _new_thread_state leaves it
     last = turns[0]
-    # thread/turns/list normalizes an active turn held by another app-server child to
-    # interrupted. A real interruption has completedAt; without it, the turn is live.
     if last.get("status") == "interrupted" and last.get("completedAt") is None:
-        last = {**last, "status": "inProgress"}
+        # No end saved for this turn. codex reports every turn it is not running itself
+        # as interrupted, so it may be live in another process -- unless it is a copy
+        # frozen at a fork: a turn that started before this thread existed was cut there
+        # and never finishes on this thread. A turn whose process died has the same shape
+        # and reads as running with growing quiet time; codex_poll recognises only this
+        # bridge's own.
+        if not _copied_at_fork(thread, last):
+            last = {**last, "status": "inProgress"}
     # The turn alone, without the thread's status, so the active-flag branch cannot fire.
     _adopt_thread_record(st, {"turns": [last]})
     if st["state"] == "running":
@@ -1341,7 +1379,15 @@ def codex_poll(args):
         # Never seen, pruned, or held over from an earlier app-server child: read what
         # codex has saved instead of attaching, so polling never takes the thread from
         # whichever process has it open.
+        with APP.lock:
+            entry = APP.threads.get(tid)
         st = read_thread_state(tid)
+        if (entry is not None and entry.get("state") == "failed" and st["state"] == "running"
+                and entry.get("turn_id") and entry.get("turn_id") == st.get("turn_id")):
+            # This bridge was running that very turn when its app-server child died. codex
+            # saved no end for it, so the read says running, but it will never finish.
+            st.update(state="failed", error=entry.get("error"),
+                      terminal_at=entry.get("terminal_at") or time.time())
     with APP.lock:
         # Everything here repeats on every poll: nothing is consumed, so a lost or
         # duplicated poll costs nothing and there are no pieces to reassemble.

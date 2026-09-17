@@ -198,8 +198,19 @@ try:
             break
         time.sleep(1)
     assert running, f"a turn running in another process never showed as running: {snap}"
-    assert holder.saw("turn/completed", t, 180), "the holder's turn did not finish"
     print("   PASS the other process's turn was visible as running")
+
+    print("== U2 a fork made mid-turn holds a frozen copy of that turn: it reads interrupted, not running")
+    cut = b.call("codex_fork", {"thread": t})
+    c = Bridge()                      # a bridge that never saw the fork reads it from codex's record
+    try:
+        seen = c.call("codex_poll", {"thread": cut["thread"]})
+    finally:
+        c.p.terminate()
+    assert seen.get("read_only") is True and seen.get("forked_from") == t, seen
+    assert seen["state"] == "interrupted", f"a fork cut mid-turn must not read as running: {seen}"
+    assert holder.saw("turn/completed", t, 180), "the holder's turn did not finish"
+    print(f"   PASS the fork {cut['thread']} reads interrupted while the holder's turn ran on")
 
     print("== V  codex_fork copies the thread; a turn on the copy remembers the conversation")
     f = b.call("codex_fork", {"thread": t})

@@ -954,3 +954,65 @@ finally:
     bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
     bridge.APP.threads.clear(); bridge.APP.requests.clear()
 print("smoke: codex_fork copies to a new id, the next turn needs no resume, an inherited cwd is held")
+
+# --- 0.15.0: turns with no saved end — a fork's frozen copy, and this bridge's own crash ---
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+_now = int(time.time())
+
+def _unfinished_record(started_at, turn_id="u80", source_turns=None, **thread):
+    base = {"id": "t80", "cwd": "/tmp", "model": "gpt-5.6-terra", "reasoningEffort": "high",
+            "status": {"type": "notLoaded"}, "createdAt": _now - 50, "updatedAt": _now - 20,
+            "forkedFromId": None, "turns": []}
+    base.update(thread)
+    turn = {"id": turn_id, "status": "interrupted", "items": [], "itemsView": "full", "durationMs": None,
+            "startedAt": started_at, "completedAt": None, "error": None}
+    def fake(method, params, timeout=120):
+        if method == "thread/read":
+            return {"thread": base}
+        if method == "thread/turns/list" and params["threadId"] == "t80":
+            return {"data": [turn], "nextCursor": None}
+        if method == "thread/turns/list" and source_turns is not None and params["threadId"] == base["forkedFromId"]:
+            assert params["sortDirection"] == "desc" and params["itemsView"] == "notLoaded", params
+            return {"data": source_turns, "nextCursor": None}
+        raise AssertionError(f"a read-only poll sent {method} {params}")
+    return fake
+
+try:
+    # a fork's copy of a turn cut at the fork started before the fork existed: frozen, not running
+    bridge.APP.request = _unfinished_record(_now - 100, forkedFromId="t79")
+    _p = bridge.codex_poll({"thread": "t80"})
+    assert _p["state"] == "interrupted" and _p["read_only"] is True and _p["forked_from"] == "t79", _p
+    # the same shape with no startedAt at all is a copy too
+    bridge.APP.request = _unfinished_record(None, forkedFromId="t79")
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "interrupted"
+    # a fork's own turn, started after the fork, may be live elsewhere; no source lookup is needed
+    bridge.APP.request = _unfinished_record(_now - 30, forkedFromId="t79")
+    _p = bridge.codex_poll({"thread": "t80"})
+    assert _p["state"] == "running" and _p["forked_from"] == "t79", _p
+    # the very second the fork was made: the source thread settles it by turn id
+    bridge.APP.request = _unfinished_record(_now - 50, forkedFromId="t79",
+                                            source_turns=[{"id": "u80", "startedAt": _now - 50}])
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "interrupted", "a same-second copy is frozen"
+    bridge.APP.request = _unfinished_record(_now - 50, forkedFromId="t79",
+                                            source_turns=[{"id": "u70", "startedAt": _now - 60}])
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "running", "a same-second own turn may be live"
+    # not a fork: an unfinished turn may be live elsewhere
+    bridge.APP.request = _unfinished_record(_now - 100)
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "running"
+
+    # this bridge's own turn, cut when its app-server child died: failed, not running
+    _died = {"message": "app-server exited while the turn was active"}
+    _old = bridge._new_thread_state("t80", "/tmp", "write", "terra-high")
+    _old.update(state="failed", error=_died, turn_id="u80", gen=bridge.APP.gen - 1)
+    bridge.APP.threads["t80"] = _old
+    bridge.APP.request = _unfinished_record(_now - 100)
+    _p = bridge.codex_poll({"thread": "t80"})
+    assert _p["state"] == "failed" and _p["error"] == _died and _p["read_only"] is True, _p
+    # ... but only for that very turn: a later turn run elsewhere reads as itself
+    bridge.APP.request = _unfinished_record(_now - 10, turn_id="u81")
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "running"
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: a fork's frozen turn reads interrupted; this bridge's own crashed turn reads failed")
