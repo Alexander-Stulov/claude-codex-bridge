@@ -158,9 +158,13 @@ The bridge reads any other thread instead of resuming it, and caches nothing:
    - `interrupted` with a `completedAt` gives interrupted, with any output: its owner
      stopped it.
    - `interrupted` without a `completedAt` has no saved end. It gives interrupted when
-     it is a copy frozen at a fork, which means the record has a `forkedFromId` and the
-     turn's `startedAt` is strictly before the thread's `createdAt`, or `startedAt` is
-     missing. Otherwise it gives `running`, because it may be live in another process.
+     it is a copy frozen at a fork. That means the record has a `forkedFromId` and the
+     turn either started strictly before the thread's `createdAt`, has no `startedAt`,
+     or started in that very second and the source thread has a turn with the same id.
+     A fork keeps the ids of the turns it copies, and whole-second times cannot
+     otherwise separate a copied turn from the fork's own. The source is looked up only
+     in that same-second case, and a source that cannot be read counts as not a copy.
+     Otherwise it gives `running`, because it may be live in another process.
      Owner decision, 2026-09-16: fix the knowable cases, and accept that a turn whose
      other process died reads as running with growing quiet time.
    - `failed` gives the error.
