@@ -889,23 +889,33 @@ _sent = []
 _proj = os.path.realpath(_tf.mkdtemp(prefix="fork-proj-"))
 _GATE = {"config": {"windows": {"sandbox": "unelevated"}}, "layers": []}
 
+_SOURCE = {"id": "t60", "model": "gpt-5.6-luna", "reasoningEffort": "medium", "modelProvider": "openai"}
+
 def _forking(result_cwd):
     def fake(method, params, timeout=120):
         _sent.append((method, params))
-        return {"config/read": _GATE,
-                "thread/fork": {"thread": {"id": "t61", "cwd": result_cwd, "turns": []},
-                                "cwd": result_cwd, "model": "gpt-5.6-sol", "reasoningEffort": "high"},
+        if method == "thread/fork":
+            # codex gives the fork the model it is asked for, and its own default otherwise
+            return {"thread": {"id": "t61", "cwd": result_cwd, "turns": []}, "cwd": result_cwd,
+                    "model": params.get("model", "gpt-6-astra"),
+                    "reasoningEffort": (params.get("config") or {}).get("model_reasoning_effort", "xhigh")}
+        return {"config/read": _GATE, "thread/read": {"thread": _SOURCE},
                 "turn/start": {"turn": {"id": "u61"}}}[method]
     return fake
 
 try:
     bridge.APP.request = _forking(_proj)
     _f = bridge.codex_fork({"thread": "t60"})
+    # the fork keeps the model, provider and effort its source ran on, not codex's default
     assert _f == {"thread": "t61", "forked_from": "t60", "state": "idle", "cwd": _proj,
-                  "workspace": "project", "model": "sol-high"}, _f
+                  "workspace": "project", "model": "luna-medium"}, _f
+    assert ("thread/read", {"threadId": "t60", "includeTurns": False}) in _sent, _sent
     _fp = next(p for m, p in _sent if m == "thread/fork")
-    assert _fp == {"threadId": "t60", "approvalPolicy": "on-request", "approvalsReviewer": "user"} or \
-        (sys.platform == "win32" and _fp.get("config") == {"windows.sandbox": "unelevated"}), _fp
+    _config = {"model_reasoning_effort": "medium"}
+    if sys.platform == "win32":
+        _config["windows.sandbox"] = "unelevated"
+    assert _fp == {"threadId": "t60", "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                   "model": "gpt-5.6-luna", "modelProvider": "openai", "config": _config}, _fp
     assert bridge.APP.threads["t61"]["forked_from"] == "t60" and bridge.APP.threads["t61"]["inherited_cwd"] is True
     _p = bridge.codex_poll({"thread": "t61"})
     assert _p["state"] == "idle" and _p["forked_from"] == "t60" and "read_only" not in _p, _p
@@ -1016,3 +1026,13 @@ finally:
     bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
     bridge.APP.threads.clear(); bridge.APP.requests.clear()
 print("smoke: a fork's frozen turn reads interrupted; this bridge's own crashed turn reads failed")
+
+# --- a compaction is counted once, when it completes ---------------------------------
+# codex sends the one contextCompaction item twice, item/started then item/completed
+# (observed live 2026-09-16); counting both made one codex_compact read as compactions 2.
+_st = bridge._new_thread_state("t90", "/tmp", "write", "luna-medium")
+bridge.APP._push_item(_st, {"type": "contextCompaction", "id": "c1"}, False)
+assert _st["activity"]["now"] == "compacting context" and "compactions" not in _st["activity"], _st["activity"]
+bridge.APP._push_item(_st, {"type": "contextCompaction", "id": "c1"}, True)
+assert _st["activity"]["compactions"] == 1, _st["activity"]
+print("smoke: a compaction is counted once, when it completes")

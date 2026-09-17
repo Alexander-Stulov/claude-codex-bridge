@@ -733,8 +733,12 @@ class AppServer:
             # The thread hit its window and codex summarised the history in place. The
             # thread keeps going and keeps its id — this is why a long run can continue
             # past the context window instead of dying at it. Worth reporting: the
-            # earlier turns still exist, but as a summary rather than verbatim.
-            self._note(st, now="compacting context", compactions=1)
+            # earlier turns still exist, but as a summary rather than verbatim. codex sends
+            # the one compaction item twice, started then completed: count it once.
+            if completed:
+                self._note(st, compactions=1)
+            else:
+                self._note(st, now="compacting context")
         elif t == "collabAgentToolCall":
             # Delegation: the parent can sit for many minutes running no command of its
             # own while children work. Children are real threads — codex_poll(child)
@@ -1648,7 +1652,20 @@ def codex_fork(args):
     if not tid or not str(tid).strip():
         raise ValueError("thread is required: the id of the thread to copy")
     APP.ensure()
+    # thread/fork without a model gives the fork codex's configured default, not the model
+    # the original ran on. Read the source (no lock taken) and carry its model over.
+    try:
+        source = APP.request("thread/read", {"threadId": tid, "includeTurns": False}, timeout=60).get("thread") or {}
+    except CodexError as e:
+        raise thread_access_error(tid, e) from None
     params = {"threadId": tid, "approvalPolicy": "on-request", "approvalsReviewer": "user"}
+    config = {}
+    if source.get("model"):
+        params["model"] = source["model"]
+    if source.get("modelProvider"):
+        params["modelProvider"] = source["modelProvider"]
+    if source.get("reasoningEffort"):
+        config["model_reasoning_effort"] = source["reasoningEffort"]
     explicit = None
     if args.get("cwd"):
         explicit = resolve_workspace(args["cwd"])[0]
@@ -1656,7 +1673,9 @@ def codex_fork(args):
     pinned = windows_gate()
     if pinned:
         # a fork is a new thread: bind the verified sandbox mode to it, as thread/start does
-        params["config"] = {"windows.sandbox": pinned}
+        config["windows.sandbox"] = pinned
+    if config:
+        params["config"] = config
     try:
         res = APP.request("thread/fork", params, timeout=120)
     except CodexError as e:

@@ -137,6 +137,7 @@ act2 = st2.get("activity") or {}
 print(f"   after compaction: state={st2['state']} compactions={act2.get('compactions')} "
       f"context={json.dumps(act2.get('context'))}")
 assert st2["state"] in ("completed", "interrupted"), st2
+assert act2.get("compactions") == 1, f"one codex_compact must count one compaction: {act2}"
 
 # The thread must still take a turn afterwards — compaction is not an ending.
 c.call("codex_submit", {"prompt": "Reply with exactly: ALIVE-AFTER-COMPACT",
