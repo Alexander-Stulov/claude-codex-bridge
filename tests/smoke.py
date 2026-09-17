@@ -37,7 +37,7 @@ manifest = json.load(open(os.path.join(os.path.dirname(__file__), "..", "manifes
 assert manifest["version"] == version, (manifest["version"], version)
 
 tools = {t["name"] for t in out[2]["result"]["tools"]}
-assert tools == {"codex_check", "codex_submit", "codex_poll", "codex_approve", "codex_interrupt",
+assert tools == {"codex_check", "codex_submit", "codex_fork", "codex_poll", "codex_approve", "codex_interrupt",
                  "codex_compact", "codex_capabilities"}, tools
 # The manifest's tool list is what the install preview shows and what a reviewer reads:
 # it must name exactly the tools the server registers, in the same order, or a new
@@ -53,6 +53,14 @@ props = sub["inputSchema"]["properties"]
 for k in ("thread", "cwd", "mode", "output_schema"):
     assert k in props, f"codex_submit missing {k}"
 assert set(props["mode"]["enum"]) == {"read", "write"}, props["mode"]
+
+# codex_fork: the thread to copy is required, where the copy works is optional, and it
+# sits next to codex_submit, which is what a caller reaches for after it
+fork_tool = next(t for t in out[2]["result"]["tools"] if t["name"] == "codex_fork")
+assert fork_tool["inputSchema"]["required"] == ["thread"], fork_tool["inputSchema"]
+assert set(fork_tool["inputSchema"]["properties"]) == {"thread", "cwd"}, fork_tool["inputSchema"]["properties"]
+_served = [t["name"] for t in out[2]["result"]["tools"]]
+assert _served.index("codex_fork") == _served.index("codex_submit") + 1, _served
 
 assert out[3]["result"]["prompts"][0]["name"] == "run-codex-job"
 # notifications/initialized is MCP's lifecycle handshake, sent on every connect. It
@@ -662,3 +670,37 @@ finally:
     bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
     bridge.APP.skill_catalog_cache = None
 print("smoke: explicit skills resolve from the catalog and ride the turn input as structured items")
+
+# --- 0.15.0: the surface for fork, read-only poll and refusals -------------------------
+# A caller has to learn at the decision points that a thread can be open in another
+# process, that polling never takes it, and that codex_fork is how to keep working.
+_durable = bridge.INSTRUCTIONS.split("DURABLE:")[1].split("LONG THREADS:")[0]
+for phrase in ("codex_fork", "held_elsewhere", "read_only: true", "resumed: true", "another process"):
+    assert phrase in _durable, f"DURABLE guidance lost {phrase!r}"
+_desc = {t["name"]: t["description"] for t in bridge.TOOLS}
+for _name, _phrases in (("codex_fork", ("held_elsewhere", "On purpose", "independent", "last saved step")),
+                        ("codex_submit", ("held_elsewhere", "codex_fork")),
+                        ("codex_compact", ("held_elsewhere", "codex_fork")),
+                        ("codex_poll", ("read_only", "not running"))):
+    for _phrase in _phrases:
+        assert _phrase in _desc[_name], f"{_name} description lost {_phrase!r}"
+
+# a refusal that carries a reason stays an ordinary rejection, names the reason and the thread
+def _held(_args):
+    raise bridge.ThreadHeldElsewhere("thread t70 is open in another process")
+
+bridge.HANDLERS["_smoke_held"] = _held
+try:
+    _resp = bridge.handle({"method": "tools/call",
+                           "params": {"name": "_smoke_held", "arguments": {"thread": "t70"}}})
+    _body = json.loads(_resp["content"][0]["text"])
+    assert _resp.get("isError") and _body == {"outcome": "rejected", "thread": "t70", "reason": "held_elsewhere",
+                                              "error": "thread t70 is open in another process"}, _body
+    assert isinstance(bridge.ThreadHeldElsewhere("x"), ValueError), "in-process callers catch ValueError"
+    # an ordinary refusal carries no reason
+    _resp = bridge.handle({"method": "tools/call",
+                           "params": {"name": "codex_submit", "arguments": {"prompt": "hi", "model": "gpt-9"}}})
+    assert "reason" not in json.loads(_resp["content"][0]["text"]), _resp
+finally:
+    del bridge.HANDLERS["_smoke_held"]
+print("smoke: codex_fork is on the surface; refusals carry their reason; guidance names fork and read-only poll")

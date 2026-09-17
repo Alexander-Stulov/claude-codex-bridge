@@ -33,6 +33,9 @@
       "name": "codex_submit"
     },
     {
+      "name": "codex_fork"
+    },
+    {
       "name": "codex_poll"
     },
     {
