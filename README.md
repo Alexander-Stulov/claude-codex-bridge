@@ -175,7 +175,8 @@ reached the bridge (not only `codex exec`), run `python3 tests/context_live.py`.
 | `codex_check` | Preflight: codex present, version, models, threads in flight |
 | `codex_capabilities` | What codex can do here: plugins and their skills, MCP servers and tools, connected apps |
 | `codex_submit` | Start a thread, add a turn to one, or steer a running turn. Returns immediately |
-| `codex_poll` | State, progress snapshot, pending approvals, and the complete output once done |
+| `codex_fork` | Copy a thread's history to a new id: branch on purpose, or continue a thread another process has open |
+| `codex_poll` | State, progress snapshot, pending approvals, and the complete output once done; a thread the bridge is not running is read without taking it |
 | `codex_approve` | Rule on an approval the thread is parked on — a command, file change, permission, or an MCP server's elicitation |
 | `codex_interrupt` | Stop the active turn; the thread stays usable |
 | `codex_compact` | Summarise the thread's history now, at a boundary you choose |
@@ -212,8 +213,19 @@ consumed, nothing needs stitching together, and a missed poll costs nothing.
 
 A thread is the unit of work and its id is the handle. codex stores threads, not
 this bridge, so a thread can be picked up tomorrow or next week: pass the id to
-`codex_poll` or `codex_submit` and the bridge re-attaches it (`resumed: true`),
-recovering the thread's real model, effort and working directory from codex.
+`codex_submit` and the bridge re-attaches it (`resumed: true`), recovering the
+thread's real model, effort and working directory from codex. `codex_poll` on a
+thread the bridge is not running reads codex's saved record instead
+(`read_only: true`), so looking at a thread never takes it from another process.
+
+codex lets one process write a thread at a time, and a process keeps each thread
+it has loaded until it unloads it or exits. When another process has the thread
+open — another Claude Desktop connection, the Codex app, `codex` in a terminal, a
+script — `codex_submit` and `codex_compact` refuse with `reason: "held_elsewhere"`.
+`codex_fork` copies the thread's saved history to a new id that can be continued,
+and compacted, at once; from then on the two threads are independent. Forking is
+just as useful on purpose, to branch a line of work while the original stays as it
+was.
 
 Filling the context window does not end a thread, and there is no size to keep a
 thread under. codex summarises the history in place and continues under the same id.
@@ -390,6 +402,7 @@ python3 tests/context_live.py           # context reporting + the uplift (needs 
 python3 tests/output_live.py            # large file writes and long final messages
 python3 tests/resume_live.py            # pick a thread back up in a new process
 python3 tests/lifecycle_live.py         # steer, interrupt, crash recovery, cold resume
+python3 tests/fork_live.py              # a thread another process holds: refused, read, forked
 ```
 
 ## Releases
