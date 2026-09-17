@@ -83,7 +83,7 @@ They are one component, so there are no cross-slice boundaries.
 
 ## Integration
 
-The controller runs integration after Task 6, from the repository root.
+The controller runs integration after Task 7, from the repository root.
 
 **CI suite** (no codex needed):
 
@@ -1735,4 +1735,229 @@ Expected: `pack check: ... ok — v0.15.0, ... 8 tools, platforms ['darwin', 'wi
 ```bash
 git add server.py manifest.json README.md docs/release-notes/v0.15.0.md
 git commit --only -m "0.15.0: document codex_fork, read-only poll and held_elsewhere" -- server.py manifest.json README.md docs/release-notes/v0.15.0.md
+```
+
+
+---
+
+### Task 7: Turns with no saved end — a fork's frozen copy, and this bridge's own crash
+
+**Phase:** build
+**Slice:** thread-access
+**Depends on:** Task 3, Task 4, Task 5, Task 6 (added after the final whole-branch review; spec amended with the owner's decision, 2026-09-16)
+
+**Why:** integration showed codex reports every turn it is not running itself as `interrupted` with `completedAt: null`, and the fix in `dcd2e1b` read that shape as `running`. The final review found the same shape is permanent in two cases the bridge can recognise: a fork made while its source was mid-turn holds a frozen copy of that turn, and a turn this bridge was running when its own app-server child died. Both must stop reading as `running`.
+
+**Files:**
+- Modify: `server.py`
+  - `read_thread_state`, the unfinished-turn rewrite
+  - the head of `codex_poll`
+- Modify: `tests/fork_live.py`, stage U
+- Modify: `docs/release-notes/v0.15.0.md`, the `read_only: true` paragraph
+- Test: `tests/smoke.py`, a new section appended at the end
+
+**Interfaces:**
+- Consumes: `read_thread_state`, `_live_entry`, `_new_thread_state` (Tasks 2 and 3).
+- Produces:
+  - `read_thread_state` reads an unfinished turn that a fork copied as `interrupted`.
+  - `codex_poll` reads this bridge's own crashed turn as `failed`, with the cached error.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append at the end of `tests/smoke.py`:
+
+```python
+# --- 0.15.0: turns with no saved end — a fork's frozen copy, and this bridge's own crash ---
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+_now = int(time.time())
+
+def _unfinished_record(started_at, turn_id="u80", **thread):
+    base = {"id": "t80", "cwd": "/tmp", "model": "gpt-5.6-terra", "reasoningEffort": "high",
+            "status": {"type": "notLoaded"}, "createdAt": _now - 50, "updatedAt": _now - 20,
+            "forkedFromId": None, "turns": []}
+    base.update(thread)
+    turn = {"id": turn_id, "status": "interrupted", "items": [], "itemsView": "full", "durationMs": None,
+            "startedAt": started_at, "completedAt": None, "error": None}
+    def fake(method, params, timeout=120):
+        if method == "thread/read":
+            return {"thread": base}
+        if method == "thread/turns/list":
+            return {"data": [turn], "nextCursor": None}
+        raise AssertionError(f"a read-only poll sent {method}")
+    return fake
+
+try:
+    # a fork's copy of a turn cut at the fork started before the fork existed: frozen, not running
+    bridge.APP.request = _unfinished_record(_now - 100, forkedFromId="t79")
+    _p = bridge.codex_poll({"thread": "t80"})
+    assert _p["state"] == "interrupted" and _p["read_only"] is True and _p["forked_from"] == "t79", _p
+    # the same shape with no startedAt at all is a copy too
+    bridge.APP.request = _unfinished_record(None, forkedFromId="t79")
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "interrupted"
+    # a fork's own turn starts at or after the fork, and may be live elsewhere
+    for _started in (_now - 50, _now - 30):
+        bridge.APP.request = _unfinished_record(_started, forkedFromId="t79")
+        _p = bridge.codex_poll({"thread": "t80"})
+        assert _p["state"] == "running" and _p["forked_from"] == "t79", (_started, _p)
+    # not a fork: an unfinished turn may be live elsewhere
+    bridge.APP.request = _unfinished_record(_now - 100)
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "running"
+
+    # this bridge's own turn, cut when its app-server child died: failed, not running
+    _died = {"message": "app-server exited while the turn was active"}
+    _old = bridge._new_thread_state("t80", "/tmp", "write", "terra-high")
+    _old.update(state="failed", error=_died, turn_id="u80", gen=bridge.APP.gen - 1)
+    bridge.APP.threads["t80"] = _old
+    bridge.APP.request = _unfinished_record(_now - 100)
+    _p = bridge.codex_poll({"thread": "t80"})
+    assert _p["state"] == "failed" and _p["error"] == _died and _p["read_only"] is True, _p
+    # ... but only for that very turn: a later turn run elsewhere reads as itself
+    bridge.APP.request = _unfinished_record(_now - 10, turn_id="u81")
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "running"
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: a fork's frozen turn reads interrupted; this bridge's own crashed turn reads failed")
+```
+
+In `tests/fork_live.py`, replace:
+
+```python
+    assert running, f"a turn running in another process never showed as running: {snap}"
+    assert holder.saw("turn/completed", t, 180), "the holder's turn did not finish"
+    print("   PASS the other process's turn was visible as running")
+```
+
+with:
+
+```python
+    assert running, f"a turn running in another process never showed as running: {snap}"
+    print("   PASS the other process's turn was visible as running")
+
+    print("== U2 a fork made mid-turn holds a frozen copy of that turn: it reads interrupted, not running")
+    cut = b.call("codex_fork", {"thread": t})
+    c = Bridge()                      # a bridge that never saw the fork reads it from codex's record
+    try:
+        seen = c.call("codex_poll", {"thread": cut["thread"]})
+    finally:
+        c.p.terminate()
+    assert seen.get("read_only") is True and seen.get("forked_from") == t, seen
+    assert seen["state"] == "interrupted", f"a fork cut mid-turn must not read as running: {seen}"
+    assert holder.saw("turn/completed", t, 180), "the holder's turn did not finish"
+    print(f"   PASS the fork {cut['thread']} reads interrupted while the holder's turn ran on")
+```
+
+- [ ] **Step 2: Run the smoke test to verify it fails**
+
+Run: `python3 tests/smoke.py`
+Expected: FAIL with `AssertionError` on the first fork case, whose state is `running`: the `dcd2e1b` rewrite promotes every unfinished turn.
+
+- [ ] **Step 3: Recognise a fork's frozen copy in `read_thread_state`**
+
+In `server.py`, replace:
+
+```python
+    last = turns[0]
+    # thread/turns/list normalizes an active turn held by another app-server child to
+    # interrupted. A real interruption has completedAt; without it, the turn is live.
+    if last.get("status") == "interrupted" and last.get("completedAt") is None:
+        last = {**last, "status": "inProgress"}
+```
+
+with:
+
+```python
+    last = turns[0]
+    if last.get("status") == "interrupted" and last.get("completedAt") is None:
+        # No end saved for this turn. codex reports every turn it is not running itself
+        # as interrupted, so it may be live in another process -- unless it is a copy
+        # frozen at a fork: a turn that started before this thread existed was cut there
+        # and never finishes on this thread. A turn whose process died has the same shape
+        # and reads as running with growing quiet time; codex_poll recognises only this
+        # bridge's own.
+        started = last.get("startedAt")
+        copied = bool(thread.get("forkedFromId")) and (started is None or started < (thread.get("createdAt") or 0))
+        if not copied:
+            last = {**last, "status": "inProgress"}
+```
+
+- [ ] **Step 4: Recognise this bridge's own crashed turn in `codex_poll`**
+
+In `server.py`, replace:
+
+```python
+    tid = args.get("thread")
+    st = _live_entry(tid)
+    read_only = st is None
+    if read_only:
+        # Never seen, pruned, or held over from an earlier app-server child: read what
+        # codex has saved instead of attaching, so polling never takes the thread from
+        # whichever process has it open.
+        st = read_thread_state(tid)
+```
+
+with:
+
+```python
+    tid = args.get("thread")
+    st = _live_entry(tid)
+    read_only = st is None
+    if read_only:
+        # Never seen, pruned, or held over from an earlier app-server child: read what
+        # codex has saved instead of attaching, so polling never takes the thread from
+        # whichever process has it open.
+        with APP.lock:
+            entry = APP.threads.get(tid)
+        st = read_thread_state(tid)
+        if (entry is not None and entry.get("state") == "failed" and st["state"] == "running"
+                and entry.get("turn_id") and entry.get("turn_id") == st.get("turn_id")):
+            # This bridge was running that very turn when its app-server child died. codex
+            # saved no end for it, so the read says running, but it will never finish.
+            st.update(state="failed", error=entry.get("error"),
+                      terminal_at=entry.get("terminal_at") or time.time())
+```
+
+The variable is named `entry` on purpose: `tests/protocol_conformance.py` treats `entry` as a bridge-owned container, so reading `turn_id` and `terminal_at` from it is not mistaken for a wire read.
+
+- [ ] **Step 5: Update the release notes**
+
+In `docs/release-notes/v0.15.0.md`, replace:
+
+```
+`read_only: true`; a turn still in progress elsewhere reports `running`, with
+`quiet_seconds` measured from the thread's last save. Threads the bridge is running
+report live progress and approvals exactly as before.
+```
+
+with:
+
+```
+`read_only: true`; a turn still in progress elsewhere reports `running`, with
+`quiet_seconds` measured from the thread's last save. A fork made while its source
+was mid-turn holds a frozen copy of that turn, which reads as `interrupted`, and a
+turn the bridge was running when its own app-server died reads as `failed`. Threads
+the bridge is running report live progress and approvals exactly as before.
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run:
+```bash
+python3 -m py_compile server.py tests/fork_live.py
+python3 tests/smoke.py
+python3 tests/protocol_conformance.py
+python3 tests/windows_sim.py
+```
+Expected:
+- all exit 0
+- `smoke.py` prints `smoke: a fork's frozen turn reads interrupted; this bridge's own crashed turn reads failed`
+
+Do not run `tests/fork_live.py`: the controller runs it at integration.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add server.py tests/smoke.py tests/fork_live.py docs/release-notes/v0.15.0.md
+git commit --only -m "Read a fork's frozen turn as interrupted and this bridge's own crashed turn as failed" -- server.py tests/smoke.py tests/fork_live.py docs/release-notes/v0.15.0.md
 ```

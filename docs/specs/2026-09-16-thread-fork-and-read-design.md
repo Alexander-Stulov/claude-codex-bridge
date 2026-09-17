@@ -47,9 +47,28 @@ The design also relies on these facts:
   says so in `thread_fork_inner`: "Auto-attach a conversation listener when forking a
   thread". Turn events for the fork therefore reach the bridge without a resume.
   `turn/start` never attaches a listener.
-- `Thread.updatedAt`, `Turn.startedAt` and `Turn.completedAt` are Unix seconds. The
-  `Thread` record carries `cwd`, `model`, `reasoningEffort`, `forkedFromId` and
-  `status`.
+- `Thread.createdAt`, `Thread.updatedAt`, `Turn.startedAt` and `Turn.completedAt` are
+  Unix seconds. The `Thread` record carries `cwd`, `model`, `reasoningEffort`,
+  `forkedFromId` and `status`.
+- A turn with no saved end reads as `interrupted` with `completedAt: null`. That shape
+  was found at integration, verified live on 2026-09-16 and confirmed in codex source.
+  It has four causes:
+  - the turn is still running in another process;
+  - the turn is a copy frozen at a fork;
+  - the process running it died, which leaves the turn without an end forever;
+  - it was stopped by a codex version that did not save a finish time.
+
+  Three codex behaviours produce it:
+  - codex rewrites every in-progress turn to `interrupted` for a thread that is not
+    active in the reading process (`normalize_thread_turns_status`);
+  - `thread/fork` of a mid-turn source writes an abort with no finish time into the
+    fork (`append_interrupted_boundary`);
+  - a process killed mid-turn writes no end at all.
+
+  A turn its owner interrupted is saved with `completedAt` and `durationMs`. A fork's
+  copied turns started before the fork's `createdAt`, while its own turns start at or
+  after it; a turn submitted in the same second as the fork starts exactly at
+  `createdAt`.
 
 ## Decisions
 
@@ -136,7 +155,14 @@ The bridge reads any other thread instead of resuming it, and caches nothing:
 3. Derive the state from that turn through the existing `_adopt_thread_record`
    mapping:
    - `completed` gives the output, with structured detection as today.
-   - `interrupted` gives interrupted, with any output.
+   - `interrupted` with a `completedAt` gives interrupted, with any output: its owner
+     stopped it.
+   - `interrupted` without a `completedAt` has no saved end. It gives interrupted when
+     it is a copy frozen at a fork, which means the record has a `forkedFromId` and the
+     turn's `startedAt` is strictly before the thread's `createdAt`, or `startedAt` is
+     missing. Otherwise it gives `running`, because it may be live in another process.
+     Owner decision, 2026-09-16: fix the knowable cases, and accept that a turn whose
+     other process died reads as running with growing quiet time.
    - `failed` gives the error.
    - `inProgress` gives `running`.
    - A thread with no turns is `idle`.
@@ -148,6 +174,12 @@ The bridge reads any other thread instead of resuming it, and caches nothing:
 4. For a `running` read, `activity.running_seconds` comes from the turn's `startedAt`
    and `activity.quiet_seconds` from the thread's `updatedAt`. When the holder has
    stalled or died, the quiet time keeps growing.
+
+   This bridge can recognise one death: its own. It may still hold a stale entry for
+   the thread whose cached state is `failed`, set by the reader when its app-server
+   child exited mid-turn. When that entry's `turn_id` equals the read's last turn id
+   and the read would say `running`, the poll answers `failed` with the cached error
+   instead: that turn will never finish.
 5. The answer carries `read_only: true`, never `resumed`. It also carries
    `forked_from` when the record has a `forkedFromId`, and provenance as today with
    `mode` unknown.
