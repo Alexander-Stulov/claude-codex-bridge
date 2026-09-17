@@ -108,6 +108,20 @@ start = next(p for m, p in sent if m == "thread/start")
 assert start.get("config") == {"windows.sandbox": "unelevated"}, start
 print("windows_sim: thread/start pin ok")
 
+# --- thread/fork carries the pin too: a fork is a new thread -------------------------
+sent.clear()
+def fork_request(method, params=None, timeout=30):
+    sent.append((method, params))
+    return {"thread/fork": {"thread": {"id": "t-fork"}, "cwd": project}}.get(method, {})
+bridge.APP.request = fork_request
+bridge.APP.windows_sandbox_mode = lambda: "elevated"
+forked = bridge.codex_fork({"thread": "t-new"})
+assert forked["thread"] == "t-fork" and forked["forked_from"] == "t-new", forked
+fork_params = next(p for m, p in sent if m == "thread/fork")
+assert fork_params.get("config") == {"windows.sandbox": "elevated"}, fork_params
+bridge.APP.threads.clear()
+print("windows_sim: thread/fork pin ok")
+
 # --- a follow-up turn that moves the thread passes the gate too ------------------------
 # The gate reads config/read on EVERY start and resume, so any fake app-server a test
 # hands codex_submit must answer it — tests/smoke.py once did not, and passed only on

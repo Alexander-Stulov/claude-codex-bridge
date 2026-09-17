@@ -37,7 +37,7 @@ manifest = json.load(open(os.path.join(os.path.dirname(__file__), "..", "manifes
 assert manifest["version"] == version, (manifest["version"], version)
 
 tools = {t["name"] for t in out[2]["result"]["tools"]}
-assert tools == {"codex_check", "codex_submit", "codex_poll", "codex_approve", "codex_interrupt",
+assert tools == {"codex_check", "codex_submit", "codex_fork", "codex_poll", "codex_approve", "codex_interrupt",
                  "codex_compact", "codex_capabilities"}, tools
 # The manifest's tool list is what the install preview shows and what a reviewer reads:
 # it must name exactly the tools the server registers, in the same order, or a new
@@ -53,6 +53,14 @@ props = sub["inputSchema"]["properties"]
 for k in ("thread", "cwd", "mode", "output_schema"):
     assert k in props, f"codex_submit missing {k}"
 assert set(props["mode"]["enum"]) == {"read", "write"}, props["mode"]
+
+# codex_fork: the thread to copy is required, where the copy works is optional, and it
+# sits next to codex_submit, which is what a caller reaches for after it
+fork_tool = next(t for t in out[2]["result"]["tools"] if t["name"] == "codex_fork")
+assert fork_tool["inputSchema"]["required"] == ["thread"], fork_tool["inputSchema"]
+assert set(fork_tool["inputSchema"]["properties"]) == {"thread", "cwd"}, fork_tool["inputSchema"]["properties"]
+_served = [t["name"] for t in out[2]["result"]["tools"]]
+assert _served.index("codex_fork") == _served.index("codex_submit") + 1, _served
 
 assert out[3]["result"]["prompts"][0]["name"] == "run-codex-job"
 # notifications/initialized is MCP's lifecycle handshake, sent on every connect. It
@@ -662,3 +670,369 @@ finally:
     bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
     bridge.APP.skill_catalog_cache = None
 print("smoke: explicit skills resolve from the catalog and ride the turn input as structured items")
+
+# --- 0.15.0: the surface for fork, read-only poll and refusals -------------------------
+# A caller has to learn at the decision points that a thread can be open in another
+# process, that polling never takes it, and that codex_fork is how to keep working.
+_durable = bridge.INSTRUCTIONS.split("DURABLE:")[1].split("LONG THREADS:")[0]
+for phrase in ("codex_fork", "held_elsewhere", "read_only: true", "resumed: true", "another process"):
+    assert phrase in _durable, f"DURABLE guidance lost {phrase!r}"
+_desc = {t["name"]: t["description"] for t in bridge.TOOLS}
+for _name, _phrases in (("codex_fork", ("held_elsewhere", "On purpose", "independent", "last saved step")),
+                        ("codex_submit", ("held_elsewhere", "codex_fork")),
+                        ("codex_compact", ("held_elsewhere", "codex_fork")),
+                        ("codex_poll", ("read_only", "not running"))):
+    for _phrase in _phrases:
+        assert _phrase in _desc[_name], f"{_name} description lost {_phrase!r}"
+
+# a refusal that carries a reason stays an ordinary rejection, names the reason and the thread
+def _held(_args):
+    raise bridge.ThreadHeldElsewhere("thread t70 is open in another process")
+
+bridge.HANDLERS["_smoke_held"] = _held
+try:
+    _resp = bridge.handle({"method": "tools/call",
+                           "params": {"name": "_smoke_held", "arguments": {"thread": "t70"}}})
+    _body = json.loads(_resp["content"][0]["text"])
+    assert _resp.get("isError") and _body == {"outcome": "rejected", "thread": "t70", "reason": "held_elsewhere",
+                                              "error": "thread t70 is open in another process"}, _body
+    assert isinstance(bridge.ThreadHeldElsewhere("x"), ValueError), "in-process callers catch ValueError"
+    # an ordinary refusal carries no reason
+    _resp = bridge.handle({"method": "tools/call",
+                           "params": {"name": "codex_submit", "arguments": {"prompt": "hi", "model": "gpt-9"}}})
+    assert "reason" not in json.loads(_resp["content"][0]["text"]), _resp
+finally:
+    del bridge.HANDLERS["_smoke_held"]
+print("smoke: codex_fork is on the surface; refusals carry their reason; guidance names fork and read-only poll")
+
+# --- 0.15.0: a thread codex will not hand over is explained, not called unknown --------
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+_sent = []
+_GATE = {"config": {"windows": {"sandbox": "unelevated"}}, "layers": []}   # the Windows runner gates on this
+
+def _refusing(message):
+    def fake(method, params, timeout=120):
+        _sent.append(method)
+        if method == "config/read":
+            return _GATE
+        if method == "thread/resume":
+            raise bridge.CodexError({"code": -32600, "message": message})
+        raise AssertionError(f"unexpected {method} after a refused resume")
+    return fake
+
+try:
+    for _message, _kind, _needle in (
+            ("thread t40 already has an active writer", bridge.ThreadHeldElsewhere, "codex_fork"),
+            ("no rollout found for thread id t40", ValueError, "unknown thread 't40'"),
+            ("invalid session id: invalid character", ValueError, "'t40' is not a thread id")):
+        for _tool, _args in (("codex_submit", {"prompt": "go", "model": "luna-medium", "thread": "t40"}),
+                             ("codex_compact", {"thread": "t40"})):
+            bridge.APP.request = _refusing(_message)
+            try:
+                bridge.HANDLERS[_tool](_args)
+                raise AssertionError(f"{_tool}: {_message!r} must refuse")
+            except ValueError as e:
+                assert type(e) is _kind and _needle in str(e), (_tool, _message, type(e).__name__, str(e))
+            assert "t40" not in bridge.APP.threads, f"{_tool}: a refused attach left a placeholder"
+    # over MCP the held refusal is an ordinary rejection that names its reason
+    bridge.APP.request = _refusing("thread t40 already has an active writer")
+    _resp = bridge.handle({"method": "tools/call", "params": {"name": "codex_compact", "arguments": {"thread": "t40"}}})
+    _body = json.loads(_resp["content"][0]["text"])
+    assert _resp.get("isError") and _body["outcome"] == "rejected" and _body["reason"] == "held_elsewhere", _body
+    assert _body["thread"] == "t40" and "another process" in _body["error"], _body
+    # anything codex did not explain is codex failing: verbatim, as a codex_error, with no reason
+    bridge.APP.request = _refusing("rollout file is corrupt")
+    _resp = bridge.handle({"method": "tools/call", "params": {"name": "codex_compact", "arguments": {"thread": "t40"}}})
+    _body = json.loads(_resp["content"][0]["text"])
+    assert _body["outcome"] == "codex_error", _body
+    assert _body["error"] == {"code": -32600, "message": "rollout file is corrupt"} and "reason" not in _body, _body
+
+    # an entry from an earlier app-server child is re-attached before compacting ...
+    def _stale_ok(method, params, timeout=120):
+        _sent.append(method)
+        return {"config/read": _GATE,
+                "thread/resume": {"thread": {"id": "t41", "status": {"type": "idle"},
+                                             "turns": [{"id": "u1", "status": "completed", "items": []}]},
+                                  "cwd": "/tmp"},
+                "thread/compact/start": {}}[method]
+    bridge.APP.request = _stale_ok
+    _sent.clear()
+    _old = bridge._new_thread_state("t41", "/tmp", "write", "luna-medium")
+    _old.update(state="completed", gen=bridge.APP.gen - 1)
+    bridge.APP.threads["t41"] = _old
+    bridge.codex_compact({"thread": "t41"})
+    assert [m for m in _sent if m != "config/read"] == ["thread/resume", "thread/compact/start"], _sent
+    assert bridge.APP.threads["t41"]["gen"] == bridge.APP.gen, "compaction must run on a re-attached entry"
+    # ... a live entry is compacted as it is ...
+    _sent.clear()
+    bridge.APP.threads["t41"]["state"] = "completed"
+    bridge.codex_compact({"thread": "t41"})
+    assert _sent == ["thread/compact/start"], _sent
+    # ... and interrupt never reaches codex for a thread this child is not running
+    _sent.clear()
+    _gone = bridge._new_thread_state("t42", "/tmp", "write", "luna-medium")
+    _gone.update(state="running", turn_id="u-gone", gen=bridge.APP.gen - 1)
+    bridge.APP.threads["t42"] = _gone
+    for _tid in ("t42", "t-never-seen"):
+        try:
+            bridge.codex_interrupt({"thread": _tid})
+            raise AssertionError(f"interrupt of {_tid} must be refused")
+        except ValueError as e:
+            assert f"thread {_tid} is not running in this plugin" in str(e), e
+    assert _sent == [], f"interrupt reached codex for a thread it is not running: {_sent}"
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: refusals are classified; stale entries re-attach before compaction and are never interrupted")
+
+# --- 0.15.0: codex_poll reads a thread it is not running, and never takes it ------------
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+_sent = []
+_now = int(time.time())
+
+def _record(turns, **thread):
+    base = {"id": "t50", "cwd": "/tmp", "model": "gpt-5.6-terra", "reasoningEffort": "high",
+            "status": {"type": "notLoaded"}, "updatedAt": _now - 40, "forkedFromId": None, "turns": []}
+    base.update(thread)
+    def fake(method, params, timeout=120):
+        _sent.append(method)
+        if method == "thread/read":
+            assert params == {"threadId": "t50", "includeTurns": False}, params
+            return {"thread": base}
+        if method == "thread/turns/list":
+            assert params == {"threadId": "t50", "limit": 1, "sortDirection": "desc", "itemsView": "full"}, params
+            return {"data": turns, "nextCursor": None}
+        raise AssertionError(f"a read-only poll sent {method}")
+    return fake
+
+def _turn(status, text=None, **extra):
+    items = [{"type": "agentMessage", "id": "i1", "text": text}] if text is not None else []
+    return {"id": "u9", "status": status, "items": items, "itemsView": "full", "durationMs": 1200,
+            "startedAt": _now - 100, "completedAt": None, "error": None, **extra}
+
+try:
+    bridge.APP.request = _record([_turn("completed", '{"verdict": "ok"}')], forkedFromId="t49")
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["read_only"] is True and "resumed" not in _p, _p
+    assert _p["state"] == "completed" and _p["output"] == {"verdict": "ok"}, _p       # structured, as a live poll
+    assert _p["forked_from"] == "t49" and _p["provenance"]["model_slug"] == "terra-high", _p
+    assert _p["provenance"]["mode"] is None and _p["provenance"]["cwd"] == "/tmp", _p["provenance"]
+    assert "t50" not in bridge.APP.threads, "a read must not cache the thread"
+
+    bridge.APP.request = _record([_turn("failed", error={"message": "boom"})])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["state"] == "failed" and _p["error"] == {"message": "boom"}, _p
+
+    bridge.APP.request = _record([_turn("interrupted", "partial", completedAt=_now - 5, durationMs=1200)])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["state"] == "interrupted" and _p["output"] == "partial", _p
+
+    # app-server normalizes a live turn owned by another process to interrupted without completion
+    bridge.APP.request = _record([_turn("interrupted", completedAt=None, durationMs=None)])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["state"] == "running" and _p["read_only"] is True, _p
+    assert 95 <= _p["activity"]["running_seconds"] <= 110, _p["activity"]
+    assert 35 <= _p["activity"]["quiet_seconds"] <= 50, _p["activity"]
+
+    bridge.APP.request = _record([_turn("inProgress")])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["state"] == "running" and _p["read_only"] is True, _p
+    assert 95 <= _p["activity"]["running_seconds"] <= 110, _p["activity"]      # from the turn's startedAt
+    assert 35 <= _p["activity"]["quiet_seconds"] <= 50, _p["activity"]         # from the thread's updatedAt
+
+    bridge.APP.request = _record([])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["state"] == "idle" and "output" not in _p, _p
+
+    # an entry held over from an earlier app-server child is read, not answered from the cache
+    _old = bridge._new_thread_state("t50", "/tmp", "write", "luna-medium")
+    _old.update(state="failed", error={"message": "app-server exited while the turn was active"},
+                gen=bridge.APP.gen - 1)
+    bridge.APP.threads["t50"] = _old
+    bridge.APP.request = _record([_turn("completed", "done elsewhere")])
+    _p = bridge.codex_poll({"thread": "t50"})
+    assert _p["read_only"] is True and _p["state"] == "completed" and _p["output"] == "done elsewhere", _p
+    assert "thread/resume" not in _sent, _sent
+
+    # ids codex has no record of, or that are not ids at all, are named as such
+    for _message, _needle in (("thread not loaded: t50", "unknown thread 't50'"),
+                              ("invalid thread id: invalid character", "'t50' is not a thread id")):
+        def _missing(method, params, timeout=120, _message=_message):
+            raise bridge.CodexError({"code": -32600, "message": _message})
+        bridge.APP.request = _missing
+        try:
+            bridge.codex_poll({"thread": "t50"})
+            raise AssertionError(_message)
+        except ValueError as e:
+            assert _needle in str(e), e
+
+    # a turns/list failure codex did not explain is codex's own error, verbatim
+    def _list_breaks(method, params, timeout=120):
+        if method == "thread/read":
+            return {"thread": {"id": "t50", "cwd": "/tmp"}}
+        raise bridge.CodexError({"code": -32603, "message": "turn store unavailable"})
+    bridge.APP.request = _list_breaks
+    _resp = bridge.handle({"method": "tools/call", "params": {"name": "codex_poll", "arguments": {"thread": "t50"}}})
+    _body = json.loads(_resp["content"][0]["text"])
+    assert _body["outcome"] == "codex_error" and _body["error"]["message"] == "turn store unavailable", _body
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: codex_poll reads threads it is not running — states, stale entries, unknown ids")
+
+# --- 0.15.0: codex_fork copies a thread to a new id, and the next turn goes straight on ---
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+_sent = []
+_proj = os.path.realpath(_tf.mkdtemp(prefix="fork-proj-"))
+_GATE = {"config": {"windows": {"sandbox": "unelevated"}}, "layers": []}
+
+_SOURCE = {"id": "t60", "model": "gpt-5.6-luna", "reasoningEffort": "medium", "modelProvider": "openai"}
+
+def _forking(result_cwd):
+    def fake(method, params, timeout=120):
+        _sent.append((method, params))
+        if method == "thread/fork":
+            # codex gives the fork the model it is asked for, and its own default otherwise
+            return {"thread": {"id": "t61", "cwd": result_cwd, "turns": []}, "cwd": result_cwd,
+                    "model": params.get("model", "gpt-6-astra"),
+                    "reasoningEffort": (params.get("config") or {}).get("model_reasoning_effort", "xhigh")}
+        return {"config/read": _GATE, "thread/read": {"thread": _SOURCE},
+                "turn/start": {"turn": {"id": "u61"}}}[method]
+    return fake
+
+try:
+    bridge.APP.request = _forking(_proj)
+    _f = bridge.codex_fork({"thread": "t60"})
+    # the fork keeps the model, provider and effort its source ran on, not codex's default
+    assert _f == {"thread": "t61", "forked_from": "t60", "state": "idle", "cwd": _proj,
+                  "workspace": "project", "model": "luna-medium"}, _f
+    assert ("thread/read", {"threadId": "t60", "includeTurns": False}) in _sent, _sent
+    _fp = next(p for m, p in _sent if m == "thread/fork")
+    _config = {"model_reasoning_effort": "medium"}
+    if sys.platform == "win32":
+        _config["windows.sandbox"] = "unelevated"
+    assert _fp == {"threadId": "t60", "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                   "model": "gpt-5.6-luna", "modelProvider": "openai", "config": _config}, _fp
+    assert bridge.APP.threads["t61"]["forked_from"] == "t60" and bridge.APP.threads["t61"]["inherited_cwd"] is True
+    _p = bridge.codex_poll({"thread": "t61"})
+    assert _p["state"] == "idle" and _p["forked_from"] == "t60" and "read_only" not in _p, _p
+    # codex attached this connection to the fork: the next turn needs no resume
+    _sent.clear()
+    _r = bridge.codex_submit({"prompt": "carry on", "model": "sol-high", "thread": "t61"})
+    assert _r["thread"] == "t61" and [m for m, _ in _sent if m != "config/read"] == ["turn/start"], _sent
+
+    # an explicit cwd rides the request, and the fork is not marked inherited
+    _sent.clear()
+    bridge.APP.threads.clear()
+    bridge.codex_fork({"thread": "t60", "cwd": _proj})
+    assert next(p for m, p in _sent if m == "thread/fork")["cwd"] == _proj, _sent
+    assert bridge.APP.threads["t61"]["inherited_cwd"] is False
+
+    # a copied cwd the bridge would refuse holds the next turn until cwd moves it
+    bridge.APP.threads.clear()
+    _home = os.path.realpath(os.path.expanduser("~"))
+    bridge.APP.request = _forking(_home)
+    bridge.codex_fork({"thread": "t60"})
+    try:
+        bridge.codex_submit({"prompt": "go", "model": "sol-high", "thread": "t61"})
+        raise AssertionError("a fork working in the home directory must be held")
+    except ValueError as e:
+        assert "forked thread t61 works in" in str(e) and "Pass cwd to move it" in str(e), e
+    _r = bridge.codex_submit({"prompt": "go", "model": "sol-high", "thread": "t61", "cwd": _proj})
+    assert _r["cwd"] == _proj, _r
+
+    # fork errors are classified like resume errors; a missing thread is refused before codex
+    def _no_such(method, params, timeout=120):
+        if method == "config/read":
+            return _GATE
+        raise bridge.CodexError({"code": -32600, "message": "no rollout found for thread id t60"})
+    bridge.APP.request = _no_such
+    try:
+        bridge.codex_fork({"thread": "t60"})
+        raise AssertionError("an unknown source must be refused")
+    except ValueError as e:
+        assert "unknown thread 't60'" in str(e), e
+    try:
+        bridge.codex_fork({"thread": " "})
+        raise AssertionError("a blank thread must be refused")
+    except ValueError as e:
+        assert "thread is required" in str(e), e
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: codex_fork copies to a new id, the next turn needs no resume, an inherited cwd is held")
+
+# --- 0.15.0: turns with no saved end — a fork's frozen copy, and this bridge's own crash ---
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+_now = int(time.time())
+
+def _unfinished_record(started_at, turn_id="u80", source_turns=None, **thread):
+    base = {"id": "t80", "cwd": "/tmp", "model": "gpt-5.6-terra", "reasoningEffort": "high",
+            "status": {"type": "notLoaded"}, "createdAt": _now - 50, "updatedAt": _now - 20,
+            "forkedFromId": None, "turns": []}
+    base.update(thread)
+    turn = {"id": turn_id, "status": "interrupted", "items": [], "itemsView": "full", "durationMs": None,
+            "startedAt": started_at, "completedAt": None, "error": None}
+    def fake(method, params, timeout=120):
+        if method == "thread/read":
+            return {"thread": base}
+        if method == "thread/turns/list" and params["threadId"] == "t80":
+            return {"data": [turn], "nextCursor": None}
+        if method == "thread/turns/list" and source_turns is not None and params["threadId"] == base["forkedFromId"]:
+            assert params["sortDirection"] == "desc" and params["itemsView"] == "notLoaded", params
+            return {"data": source_turns, "nextCursor": None}
+        raise AssertionError(f"a read-only poll sent {method} {params}")
+    return fake
+
+try:
+    # a fork's copy of a turn cut at the fork started before the fork existed: frozen, not running
+    bridge.APP.request = _unfinished_record(_now - 100, forkedFromId="t79")
+    _p = bridge.codex_poll({"thread": "t80"})
+    assert _p["state"] == "interrupted" and _p["read_only"] is True and _p["forked_from"] == "t79", _p
+    # the same shape with no startedAt at all is a copy too
+    bridge.APP.request = _unfinished_record(None, forkedFromId="t79")
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "interrupted"
+    # a fork's own turn, started after the fork, may be live elsewhere; no source lookup is needed
+    bridge.APP.request = _unfinished_record(_now - 30, forkedFromId="t79")
+    _p = bridge.codex_poll({"thread": "t80"})
+    assert _p["state"] == "running" and _p["forked_from"] == "t79", _p
+    # the very second the fork was made: the source thread settles it by turn id
+    bridge.APP.request = _unfinished_record(_now - 50, forkedFromId="t79",
+                                            source_turns=[{"id": "u80", "startedAt": _now - 50}])
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "interrupted", "a same-second copy is frozen"
+    bridge.APP.request = _unfinished_record(_now - 50, forkedFromId="t79",
+                                            source_turns=[{"id": "u70", "startedAt": _now - 60}])
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "running", "a same-second own turn may be live"
+    # not a fork: an unfinished turn may be live elsewhere
+    bridge.APP.request = _unfinished_record(_now - 100)
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "running"
+
+    # this bridge's own turn, cut when its app-server child died: failed, not running
+    _died = {"message": "app-server exited while the turn was active"}
+    _old = bridge._new_thread_state("t80", "/tmp", "write", "terra-high")
+    _old.update(state="failed", error=_died, turn_id="u80", gen=bridge.APP.gen - 1)
+    bridge.APP.threads["t80"] = _old
+    bridge.APP.request = _unfinished_record(_now - 100)
+    _p = bridge.codex_poll({"thread": "t80"})
+    assert _p["state"] == "failed" and _p["error"] == _died and _p["read_only"] is True, _p
+    # ... but only for that very turn: a later turn run elsewhere reads as itself
+    bridge.APP.request = _unfinished_record(_now - 10, turn_id="u81")
+    assert bridge.codex_poll({"thread": "t80"})["state"] == "running"
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: a fork's frozen turn reads interrupted; this bridge's own crashed turn reads failed")
+
+# --- a compaction is counted once, when it completes ---------------------------------
+# codex sends the one contextCompaction item twice, item/started then item/completed
+# (observed live 2026-09-16); counting both made one codex_compact read as compactions 2.
+_st = bridge._new_thread_state("t90", "/tmp", "write", "luna-medium")
+bridge.APP._push_item(_st, {"type": "contextCompaction", "id": "c1"}, False)
+assert _st["activity"]["now"] == "compacting context" and "compactions" not in _st["activity"], _st["activity"]
+bridge.APP._push_item(_st, {"type": "contextCompaction", "id": "c1"}, True)
+assert _st["activity"]["compactions"] == 1, _st["activity"]
+print("smoke: a compaction is counted once, when it completes")

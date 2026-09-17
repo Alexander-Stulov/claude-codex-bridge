@@ -11,12 +11,15 @@ wire format). Sessions are real codex threads: they hold context between calls,
 accept follow-up turns, can be steered mid-turn, and survive a bridge restart via
 thread/resume.
 
-Exposed as seven MCP tools:
+Exposed as eight MCP tools:
   codex_check      readiness, models, live threads
   codex_capabilities  what codex can do here: plugins and their $skills, MCP servers, apps
   codex_submit     new thread or next turn (or steer a running one); per-turn model,
                    mode, cwd and JSON output schema
-  codex_poll       snapshot: state, what it is doing now, pending approvals, final output
+  codex_fork       copy a thread's history to a new id: branch it, or continue a thread
+                   another process has open
+  codex_poll       snapshot: state, what it is doing now, pending approvals, final output;
+                   a thread this bridge is not running is read without taking it
   codex_approve    resolve an approval codex is waiting on, then it continues
   codex_interrupt  stop the active turn
   codex_compact    summarise the thread's history now, at a boundary you choose
@@ -59,7 +62,7 @@ INSTRUCTIONS = """Dispatch OpenAI codex as an interactive subagent on the user's
 
 SESSIONS: codex_submit with no thread starts one and returns {thread, turn}; pass that thread back to add a turn (follow-up input, a correction, a new question) with full prior context. If the thread is mid-turn, the input steers the running turn instead.
 
-DURABLE: the thread id is the handle to the work. codex stores threads, not this bridge, so keep the id and pick the same thread up tomorrow or next week - codex_poll or codex_submit re-attaches it automatically and the answer carries resumed: true. Record the thread id with whatever the work belongs to; it is the only thing needed to continue.
+DURABLE: the thread id is the handle to the work. codex stores threads, not this bridge, so keep the id and pick the same thread up tomorrow or next week - codex_submit re-attaches it automatically and the answer carries resumed: true, and codex_poll reads its latest saved results without taking it (read_only: true). One process at a time can write a thread: when another process has it open - another Claude Desktop connection, the Codex app, codex in a terminal, a script - codex_submit and codex_compact answer reason held_elsewhere, and codex_fork copies its history to a new id you can continue at once. Record the thread id with whatever the work belongs to; it is the only thing needed to continue.
 
 LONG THREADS: a thread is not capped. When it fills up codex summarises its own history and carries on under the same id, so keep one thread for one line of work instead of splitting it to stay small: coherent, closely-coupled work belongs in one thread, and what matters survives compaction. Split for parallelism, not for length - work that divides cleanly runs faster and cheaper as several threads, whatever the model. Scouts should finish and return their findings inside the runway, so the detail reaches the caller verbatim rather than through a summary. activity.context.tokens_before_compaction is the room left before that happens - a runway, not a limit. While it is large, just keep going. As it gets small, choose deliberately:
 - carry on and let codex compact (fine when the work is exploratory and only conclusions matter);
@@ -94,7 +97,7 @@ APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, 
 
 RESULTS: completed carries output (text, or your schema's JSON) plus bridge-stamped provenance - trust that over anything the model says about itself. Errors come back verbatim, including schema rejections."""
 
-SERVER_INFO = {"name": "codex", "version": "0.14.0"}
+SERVER_INFO = {"name": "codex", "version": "0.15.0"}
 
 # Friendly slug -> (wire model, reasoning effort). One caller-facing knob; the
 # app-server takes them as separate per-turn fields.
@@ -373,6 +376,13 @@ class CodexError(Exception):
     def __init__(self, payload):
         self.payload = payload
         super().__init__(json.dumps(payload)[:400])
+
+
+class ThreadHeldElsewhere(ValueError):
+    """Another process has the thread open. codex lets one process write a thread at a
+    time, so this is a refusal the caller can act on (fork it, or wait), not codex failing.
+    A ValueError, so in-process callers that already catch refusals keep working."""
+    reason = "held_elsewhere"
 
 
 class AppServer:
@@ -723,8 +733,12 @@ class AppServer:
             # The thread hit its window and codex summarised the history in place. The
             # thread keeps going and keeps its id — this is why a long run can continue
             # past the context window instead of dying at it. Worth reporting: the
-            # earlier turns still exist, but as a summary rather than verbatim.
-            self._note(st, now="compacting context", compactions=1)
+            # earlier turns still exist, but as a summary rather than verbatim. codex sends
+            # the one compaction item twice, started then completed: count it once.
+            if completed:
+                self._note(st, compactions=1)
+            else:
+                self._note(st, now="compacting context")
         elif t == "collabAgentToolCall":
             # Delegation: the parent can sit for many minutes running no command of its
             # own while children work. Children are real threads — codex_poll(child)
@@ -797,9 +811,43 @@ def pending_for(tid):
 WIRE_TO_SLUG = {(m, e): slug for slug, (m, e) in MODELS.items()}
 
 
+def _live_entry(tid):
+    """The cached state of a thread THIS app-server child has loaded, or None. An entry
+    from an earlier generation outlived the child that loaded it: codex no longer has
+    the thread open here, so it is not ours to report live, compact or interrupt."""
+    with APP.lock:
+        st = APP.threads.get(tid)
+    return st if st is not None and st.get("gen") == APP.gen else None
+
+
+def thread_access_error(tid, err):
+    """The error a caller sees when codex will not resume, fork or read a thread. codex
+    sends every such refusal as -32600, so only its message tells them apart. The classes
+    matched here describe the thread or the id the caller passed, so they are refusals;
+    anything else is codex failing and goes back exactly as codex said it. thread/read
+    and thread/turns/list word a malformed id as "invalid thread id", resume and fork as
+    "invalid session id"; an unknown well-formed id is "thread not loaded" to the first
+    two and "no rollout found" to the others."""
+    payload = err.payload if isinstance(err.payload, dict) else {}
+    message = str(payload.get("message") or "")
+    if "already has an active writer" in message:
+        return ThreadHeldElsewhere(
+            f"thread {tid} is open in another process: another Claude Desktop connection, the Codex app, "
+            f"codex in a terminal, or a script. codex lets one process write a thread at a time, and that "
+            f"process keeps the thread until it unloads it or exits. codex_poll still reads its latest "
+            f"results. To continue now, codex_fork it and use the new thread, which can be compacted too. "
+            f"Otherwise retry once that process lets go.")
+    if "no rollout found" in message or "thread not loaded" in message:
+        return ValueError(f"unknown thread '{tid}': codex has no saved thread with that id")
+    if "invalid session id" in message or "invalid thread id" in message:
+        return ValueError(f"'{tid}' is not a thread id")
+    return err
+
+
 def attach_thread(tid, cwd_override=None, mode=None, model_slug=None):
     """Take ownership of a thread this bridge is not currently tracking — pruned from
-    the local cache, or held over from a previous bridge process.
+    the local cache, or held over from a previous bridge process — before codex_submit
+    or codex_compact sends it work.
 
     resume, not read. `thread/read` returns a snapshot: it does not subscribe, and it
     does not replay the server requests the thread is already parked on, so a live
@@ -828,8 +876,7 @@ def attach_thread(tid, cwd_override=None, mode=None, model_slug=None):
         with APP.lock:
             if claimed and APP.threads.get(tid) is placeholder:
                 APP.threads.pop(tid, None)
-        raise ValueError(f"unknown thread '{tid}': codex could not resume it "
-                         f"({json.dumps(e.payload)[:200]})")
+        raise thread_access_error(tid, e) from None
 
     thread = res.get("thread") or {}
     cwd = cwd_override or res.get("cwd") or thread.get("cwd") or SCRATCH_ROOT
@@ -890,6 +937,82 @@ def _adopt_thread_record(st, thread):
         st["output"] = None
         st["output_unavailable"] = (f"codex returned itemsView={items_view!r} for this turn, "
                                     f"so the final message was not loaded")
+
+
+def _copied_at_fork(thread, turn):
+    """Whether this thread's turn is a copy its fork took from the source, rather than the
+    fork's own. codex saves times in whole seconds: a turn that started before the fork
+    existed is a copy, and one that started after it is the fork's own. A turn that started
+    in the very second the fork was made is a copy exactly when the source thread has a turn
+    with the same id, because a fork keeps the ids of the turns it copies. When the source
+    cannot be read, the turn counts as the fork's own."""
+    source = thread.get("forkedFromId")
+    if not source:
+        return False
+    started, created = turn.get("startedAt"), thread.get("createdAt") or 0
+    if started is None or started < created:
+        return True
+    if started > created:
+        return False
+    cursor = None
+    try:
+        while True:
+            params = {"threadId": source, "limit": 20, "sortDirection": "desc", "itemsView": "notLoaded"}
+            if cursor:
+                params["cursor"] = cursor
+            page = APP.request("thread/turns/list", params, timeout=60)
+            rows = page.get("data") or []
+            if any(row.get("id") == turn.get("id") for row in rows):
+                return True
+            cursor = page.get("nextCursor")
+            # Newest first: once a page reaches turns older than the fork, the copy is not there.
+            if not cursor or not rows or (rows[-1].get("startedAt") or 0) < created:
+                return False
+    except CodexError:
+        return False
+
+
+def read_thread_state(tid):
+    """A thread this app-server child is not running, rebuilt from codex's saved record.
+
+    Read, never resumed: resuming takes codex's writer lock, and this bridge keeps what it
+    takes for as long as it runs, so a poll alone would lock every other process out of
+    the thread. Never cached, so the next poll reads fresh. thread/read describes the
+    thread from this process's side, where a thread open elsewhere is notLoaded, so its
+    status flags say nothing about a live turn: the state is the last turn's own."""
+    APP.ensure()
+    try:
+        res = APP.request("thread/read", {"threadId": tid, "includeTurns": False}, timeout=60)
+        page = APP.request("thread/turns/list", {"threadId": tid, "limit": 1, "sortDirection": "desc",
+                                                 "itemsView": "full"}, timeout=60)
+    except CodexError as e:
+        raise thread_access_error(tid, e) from None
+    thread = res.get("thread") or {}
+    cwd = thread.get("cwd") or SCRATCH_ROOT
+    slug = WIRE_TO_SLUG.get((thread.get("model"), thread.get("reasoningEffort")), thread.get("model"))
+    st = _new_thread_state(tid, cwd, None, slug, "scratch" if str(cwd).startswith(SCRATCH_ROOT) else "project")
+    forked_from = thread.get("forkedFromId")
+    if forked_from:
+        st["forked_from"] = forked_from
+    turns = page.get("data") or []
+    if not turns:
+        return st          # no turn yet: idle, as _new_thread_state leaves it
+    last = turns[0]
+    if last.get("status") == "interrupted" and last.get("completedAt") is None:
+        # No end saved for this turn. codex reports every turn it is not running itself
+        # as interrupted, so it may be live in another process -- unless it is a copy
+        # frozen at a fork: a turn that started before this thread existed was cut there
+        # and never finishes on this thread. A turn whose process died has the same shape
+        # and reads as running with growing quiet time; codex_poll recognises only this
+        # bridge's own.
+        if not _copied_at_fork(thread, last):
+            last = {**last, "status": "inProgress"}
+    # The turn alone, without the thread's status, so the active-flag branch cannot fire.
+    _adopt_thread_record(st, {"turns": [last]})
+    if st["state"] == "running":
+        st["started_at"] = last.get("startedAt") or st["started_at"]
+        st["changed_at"] = thread.get("updatedAt") or st["changed_at"]
+    return st
 
 
 def prune_threads():
@@ -1166,13 +1289,15 @@ def codex_submit(args):
                 with APP.lock:
                     APP.threads.pop(tid, None)     # so attach_thread claims it afresh
             st = attach_thread(tid, cwd_override, mode=mode, model_slug=model_slug)
-        if st.get("resumed") and not args.get("cwd"):
-            # A resumed thread's cwd is whatever another client chose for it. Hold it to
-            # the same rule as a thread the bridge starts — before steering or a new turn
-            # sends more work there. Inspection and interruption stay available.
+        if (st.get("resumed") or st.get("inherited_cwd")) and not args.get("cwd"):
+            # A resumed thread's cwd is whatever another client chose for it, and a fork's is
+            # copied from the thread it came from. Hold both to the same rule as a thread the
+            # bridge starts — before steering or a new turn sends more work there.
+            # Inspection and interruption stay available.
             reason = refuse_reason(os.path.realpath(st["cwd"]))
             if reason:
-                raise ValueError(f"resumed thread {tid} works in {st['cwd']}: {reason}. Pass cwd to move it.")
+                label = "resumed thread" if st.get("resumed") else "forked thread"
+                raise ValueError(f"{label} {tid} works in {st['cwd']}: {reason}. Pass cwd to move it.")
         if st["state"] == "awaiting_approval":
             ids = [p["request_id"] for p in pending_for(tid)]
             raise ValueError(f"thread {tid} is waiting on approval request(s) {ids} — "
@@ -1252,12 +1377,21 @@ def codex_submit(args):
 
 def codex_poll(args):
     tid = args.get("thread")
-    with APP.lock:
-        st = APP.threads.get(tid)
-    if st is None:
-        # Pruned from the local cache, or left over from a previous bridge process.
-        # codex is the store, so attach rather than lose hours of work to a cache expiry.
-        st = attach_thread(tid)
+    st = _live_entry(tid)
+    read_only = st is None
+    if read_only:
+        # Never seen, pruned, or held over from an earlier app-server child: read what
+        # codex has saved instead of attaching, so polling never takes the thread from
+        # whichever process has it open.
+        with APP.lock:
+            entry = APP.threads.get(tid)
+        st = read_thread_state(tid)
+        if (entry is not None and entry.get("state") == "failed" and st["state"] == "running"
+                and entry.get("turn_id") and entry.get("turn_id") == st.get("turn_id")):
+            # This bridge was running that very turn when its app-server child died. codex
+            # saved no end for it, so the read says running, but it will never finish.
+            st.update(state="failed", error=entry.get("error"),
+                      terminal_at=entry.get("terminal_at") or time.time())
     with APP.lock:
         # Everything here repeats on every poll: nothing is consumed, so a lost or
         # duplicated poll costs nothing and there are no pieces to reassemble.
@@ -1282,9 +1416,13 @@ def codex_poll(args):
         if runway is not None:
             activity["context"] = runway
         out = {"thread": tid, "state": state, "activity": activity}
-        if st.get("resumed"):
+        if read_only:
+            out["read_only"] = True
+        elif st.get("resumed"):
             # the bridge re-attached to an existing thread rather than creating it
             out["resumed"] = True
+        if st.get("forked_from"):
+            out["forked_from"] = st["forked_from"]
         if state == "awaiting_approval":
             out["requests"] = pending_for(tid)          # derived; may be more than one
             out["thread_scope"] = {"mode": st["mode"], "cwd": st["cwd"]}
@@ -1465,10 +1603,12 @@ def codex_approve(args):
 
 def codex_interrupt(args):
     tid = args.get("thread")
-    with APP.lock:
-        st = APP.threads.get(tid)
+    st = _live_entry(tid)
     if st is None:
-        raise ValueError(f"unknown thread '{tid}'")
+        # Never seen, or held over from an earlier child: the turn it remembers died with
+        # that child, and a turn running in another process is not this bridge's to stop.
+        raise ValueError(f"thread {tid} is not running in this plugin: a turn running in another "
+                         f"process has to be stopped there")
     if not st.get("turn_id"):
         return {"thread": tid, "state": st["state"], "note": "no active turn"}
     APP.request("turn/interrupt", {"threadId": tid, "turnId": st["turn_id"]}, timeout=60)
@@ -1483,10 +1623,13 @@ def codex_compact(args):
     summary is taken at a clean point instead of halfway through an investigation.
     """
     tid = args.get("thread")
-    with APP.lock:
-        st = APP.threads.get(tid)
+    st = _live_entry(tid)
     if st is None:
-        st = attach_thread(tid)
+        # Missing, or held over from an earlier app-server child that has not loaded it:
+        # attach first, as codex_submit does, keeping the working directory it had.
+        with APP.lock:
+            stale = APP.threads.pop(tid, None)
+        st = attach_thread(tid, stale["cwd"] if stale else None)
     if st["state"] == "running" and st.get("turn_id"):
         raise ValueError(f"thread {tid} is mid-turn — compacting now would summarise the work "
                          f"in progress. Wait for the turn to finish, or codex_interrupt first.")
@@ -1497,6 +1640,61 @@ def codex_compact(args):
         st["changed_at"] = time.time()
     return {"thread": tid, "state": "running",
             "note": "compaction started — poll until it completes; the thread keeps its id"}
+
+
+def codex_fork(args):
+    """Copy a thread's saved history to a new thread id, cached like a thread this bridge
+    started. codex takes the writer lock on the NEW id only, so this works while another
+    process holds the original: the way to keep working on a thread codex_submit refused
+    as held_elsewhere. codex also attaches this connection to the fork, so a turn on it
+    needs no resume. Saved, not ephemeral: the new id is a handle that lasts."""
+    tid = args.get("thread")
+    if not tid or not str(tid).strip():
+        raise ValueError("thread is required: the id of the thread to copy")
+    APP.ensure()
+    # thread/fork without a model gives the fork codex's configured default, not the model
+    # the original ran on. Read the source (no lock taken) and carry its model over.
+    try:
+        source = APP.request("thread/read", {"threadId": tid, "includeTurns": False}, timeout=60).get("thread") or {}
+    except CodexError as e:
+        raise thread_access_error(tid, e) from None
+    params = {"threadId": tid, "approvalPolicy": "on-request", "approvalsReviewer": "user"}
+    config = {}
+    if source.get("model"):
+        params["model"] = source["model"]
+    if source.get("modelProvider"):
+        params["modelProvider"] = source["modelProvider"]
+    if source.get("reasoningEffort"):
+        config["model_reasoning_effort"] = source["reasoningEffort"]
+    explicit = None
+    if args.get("cwd"):
+        explicit = resolve_workspace(args["cwd"])[0]
+        params["cwd"] = explicit
+    pinned = windows_gate()
+    if pinned:
+        # a fork is a new thread: bind the verified sandbox mode to it, as thread/start does
+        config["windows.sandbox"] = pinned
+    if config:
+        params["config"] = config
+    try:
+        res = APP.request("thread/fork", params, timeout=120)
+    except CodexError as e:
+        raise thread_access_error(tid, e) from None
+    thread = res.get("thread") or {}
+    new_id = thread.get("id")
+    if not new_id:
+        raise CodexError({"message": "thread/fork returned no thread id", "result": res})
+    cwd = explicit or res.get("cwd") or thread.get("cwd") or SCRATCH_ROOT
+    kind = "scratch" if str(cwd).startswith(SCRATCH_ROOT) else "project"
+    slug = WIRE_TO_SLUG.get((res.get("model"), res.get("reasoningEffort")), res.get("model"))
+    st = _new_thread_state(new_id, cwd, None, slug, kind)
+    st["forked_from"] = tid
+    # The copied cwd is whatever the original's client chose: codex_submit holds it to the
+    # resumed-thread rule until a turn passes cwd.
+    st["inherited_cwd"] = explicit is None
+    with APP.lock:
+        APP.threads[new_id] = st
+    return {"thread": new_id, "forked_from": tid, "state": "idle", "cwd": cwd, "workspace": kind, "model": slug}
 
 
 TOOLS = [
@@ -1523,7 +1721,9 @@ TOOLS = [
         "description": ("Start a codex thread or add a turn to one. No thread → new session; a thread that is idle → "
                         "next turn with full prior context; a thread mid-turn → the input steers the running turn. "
                         "Returns instantly: poll with codex_poll. Pass output_schema on any turn to get JSON back. Inject a plugin skill "
-                        "with skills (codex_capabilities lists their names)."),
+                        "with skills (codex_capabilities lists their names). A thread another process has open — "
+                        "another Claude Desktop connection, the Codex app, codex in a terminal, a script — is refused "
+                        "with reason held_elsewhere: codex_fork it to continue on a new id."),
         "inputSchema": {"type": "object", "properties": {
             "prompt": {"type": "string", "description": "The instruction. For a new thread this is all codex sees — make it self-contained. Ask for the answer as output rather than a report file, and if it covers many items bound it here — cap, index, and what to do when they do not fit. Nothing else will."},
             "model": {"type": "string", "enum": sorted(MODELS),
@@ -1539,13 +1739,30 @@ TOOLS = [
             "required": ["prompt", "model"], "additionalProperties": False},
     },
     {
+        "name": "codex_fork",
+        "description": ("Copy a thread's full saved history to a new thread id, then codex_submit to the new id "
+                        "to continue there. Two uses. On purpose: branch a line of work — try another direction — "
+                        "while the original stays exactly as it was. As a workaround: when codex_submit or "
+                        "codex_compact answers reason held_elsewhere, the thread is open in another process; fork it "
+                        "and keep working on the copy, compaction included, while the original stays with that "
+                        "process. codex copies what it has saved, so a turn still running elsewhere comes over only "
+                        "up to its last saved step. From then on the two threads are independent: record the new id "
+                        "with the work. cwd defaults to the original thread's working directory."),
+        "inputSchema": {"type": "object", "properties": {
+            "thread": {"type": "string", "description": "The thread to copy."},
+            "cwd": {"type": "string", "description": "Absolute path the fork works in. Omit to keep the original thread's working directory."}},
+            "required": ["thread"], "additionalProperties": False},
+    },
+    {
         "name": "codex_poll",
         "description": ("Where the thread is right now: state (running | awaiting_approval | completed | "
                         "failed), an activity snapshot (what it is doing and how much it has done), the "
                         "pending approval request(s) when it is waiting — a command, file change, permission "
                         "or an MCP elicitation, each with what is being asked — and the complete output "
                         "once it is done. Idempotent — nothing is consumed, and the answer arrives whole rather than in "
-                        "pieces to reassemble. Poll every 20-30s and relay activity in plain language."),
+                        "pieces to reassemble. Poll every 20-30s and relay activity in plain language. A thread this "
+                        "bridge is not running is read from codex's saved record without taking it (read_only: true): "
+                        "its latest results, never its approvals, which belong to the process running it."),
         "inputSchema": {"type": "object", "properties": {"thread": {"type": "string"}},
                         "required": ["thread"], "additionalProperties": False},
     },
@@ -1582,14 +1799,15 @@ TOOLS = [
                         "does it automatically when the thread fills up, but then the summary lands "
                         "wherever the work happens to be. Call this between turns once results are "
                         "banked and activity.context.tokens_before_compaction is getting small. The "
-                        "thread keeps its id and stays usable; poll until it completes."),
+                        "thread keeps its id and stays usable; poll until it completes. A thread open in "
+                        "another process is refused with reason held_elsewhere: codex_fork it and compact the fork."),
         "inputSchema": {"type": "object", "properties": {"thread": {"type": "string"}},
                         "required": ["thread"], "additionalProperties": False},
     },
 ]
 
 HANDLERS = {"codex_check": codex_check, "codex_capabilities": codex_capabilities,
-            "codex_submit": codex_submit, "codex_poll": codex_poll,
+            "codex_submit": codex_submit, "codex_fork": codex_fork, "codex_poll": codex_poll,
             "codex_approve": codex_approve, "codex_interrupt": codex_interrupt,
             "codex_compact": codex_compact}
 
@@ -1645,6 +1863,11 @@ def handle(req):
             thread = getattr(e, "codex_thread", None) or args.get("thread")
             if thread:
                 body["thread"] = thread
+            # A refusal the caller can act on names its reason, so a script branches on it
+            # without parsing prose: held_elsewhere means codex_fork.
+            reason = getattr(e, "reason", None)
+            if reason:
+                body["reason"] = reason
             return {"content": [{"type": "text", "text": json.dumps(body, indent=2)}],
                     "isError": True}
     if method == "ping":
