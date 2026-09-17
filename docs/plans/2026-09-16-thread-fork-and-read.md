@@ -128,6 +128,7 @@ Together these cover every path the spec changes. `fork_live.py` is the end-to-e
 
 **Files:**
 - Modify: `server.py`
+  - the module docstring's tool list (lines 14-22)
   - `INSTRUCTIONS`, DURABLE paragraph (line 62)
   - after `class CodexError` (lines 370-375)
   - after `codex_compact` (ends near line 1499)
@@ -366,7 +367,32 @@ HANDLERS = {"codex_check": codex_check, "codex_capabilities": codex_capabilities
             "codex_compact": codex_compact}
 ```
 
-- [ ] **Step 5: Rewrite the DURABLE paragraph and the manifest tools**
+- [ ] **Step 5: Rewrite the module docstring's tool list, the DURABLE paragraph and the manifest tools**
+
+In the `server.py` module docstring, replace:
+
+```
+Exposed as seven MCP tools:
+  codex_check      readiness, models, live threads
+  codex_capabilities  what codex can do here: plugins and their $skills, MCP servers, apps
+  codex_submit     new thread or next turn (or steer a running one); per-turn model,
+                   mode, cwd and JSON output schema
+  codex_poll       snapshot: state, what it is doing now, pending approvals, final output
+```
+
+with:
+
+```
+Exposed as eight MCP tools:
+  codex_check      readiness, models, live threads
+  codex_capabilities  what codex can do here: plugins and their $skills, MCP servers, apps
+  codex_submit     new thread or next turn (or steer a running one); per-turn model,
+                   mode, cwd and JSON output schema
+  codex_fork       copy a thread's history to a new id: branch it, or continue a thread
+                   another process has open
+  codex_poll       snapshot: state, what it is doing now, pending approvals, final output;
+                   a thread this bridge is not running is read without taking it
+```
 
 In `server.py` `INSTRUCTIONS`, replace the whole line that starts with `DURABLE:`:
 
@@ -1047,7 +1073,7 @@ git commit --only -m "Read threads codex_poll is not running instead of taking t
 
 **Phase:** build
 **Slice:** thread-access
-**Depends on:** Task 1, Task 2
+**Depends on:** Task 1, Task 2, Task 3 (its test polls the fork and expects `forked_from`, which Task 3's `codex_poll` adds)
 
 **Files:**
 - Modify: `server.py`
