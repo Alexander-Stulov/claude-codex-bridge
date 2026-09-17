@@ -40,8 +40,9 @@ The design also relies on these facts:
 
 - Every resume failure uses code `-32600`, so only the message tells them apart:
   `already has an active writer`, `no rollout found for thread id <id>`, and
-  `invalid session id: …`. A `thread/read` of an id with no saved thread answers
-  `thread not loaded: <id>`.
+  `invalid session id: …`. `thread/read` and `thread/turns/list` word the same two cases
+  differently. An id with no saved thread answers `thread not loaded: <id>`, and a
+  malformed id answers `invalid thread id: …`.
 - codex attaches the forking connection as a listener of the new thread. Its source
   says so in `thread_fork_inner`: "Auto-attach a conversation listener when forking a
   thread". Turn events for the fork therefore reach the bridge without a resume.
@@ -166,7 +167,7 @@ A single classifier turns a `CodexError` from `thread/resume`, `thread/fork`,
 |---|---|---|
 | `already has an active writer` | `ThreadHeldElsewhere` (a `ValueError`), with the text below | `rejected`, plus `reason` |
 | `no rollout found`, `thread not loaded` | `ValueError`: `unknown thread '<id>': codex has no saved thread with that id` | `rejected` |
-| `invalid session id` | `ValueError`: `'<id>' is not a thread id` | `rejected` |
+| `invalid session id`, `invalid thread id` | `ValueError`: `'<id>' is not a thread id` | `rejected` |
 | anything else | the original `CodexError`, unchanged | `codex_error`, with codex's payload verbatim |
 
 The first three describe the thread or the id the caller passed, so they are refusals.

@@ -23,7 +23,7 @@
   - `no rollout found` and `thread not loaded` give "unknown thread".
   - `invalid session id` and `invalid thread id` give "not a thread id".
 - Anything else is re-raised as the original `CodexError`.
-- **Spec amendment pending the owner's approval:** `invalid thread id`. On codex-cli 0.154.0, `thread/read` and `thread/turns/list` report a malformed id with that text, while `thread/fork` and `thread/resume` use `invalid session id`. The spec's table lists only the latter.
+- **Spec amended, approved by the owner on 2026-09-16:** `invalid thread id`. On codex-cli 0.154.0, `thread/read` and `thread/turns/list` report a malformed id with that text, while `thread/fork` and `thread/resume` use `invalid session id`. The spec's table now lists both.
 
 **Wire parameters and markers**
 - `thread/fork` params are `threadId`, `approvalPolicy: "on-request"` and `approvalsReviewer: "user"`, plus `cwd` when given and `config: {"windows.sandbox": <mode>}` when the Windows gate pins a mode. The fork is saved, never ephemeral.
