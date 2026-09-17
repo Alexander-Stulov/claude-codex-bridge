@@ -807,9 +807,43 @@ def pending_for(tid):
 WIRE_TO_SLUG = {(m, e): slug for slug, (m, e) in MODELS.items()}
 
 
+def _live_entry(tid):
+    """The cached state of a thread THIS app-server child has loaded, or None. An entry
+    from an earlier generation outlived the child that loaded it: codex no longer has
+    the thread open here, so it is not ours to report live, compact or interrupt."""
+    with APP.lock:
+        st = APP.threads.get(tid)
+    return st if st is not None and st.get("gen") == APP.gen else None
+
+
+def thread_access_error(tid, err):
+    """The error a caller sees when codex will not resume, fork or read a thread. codex
+    sends every such refusal as -32600, so only its message tells them apart. The classes
+    matched here describe the thread or the id the caller passed, so they are refusals;
+    anything else is codex failing and goes back exactly as codex said it. thread/read
+    and thread/turns/list word a malformed id as "invalid thread id", resume and fork as
+    "invalid session id"; an unknown well-formed id is "thread not loaded" to the first
+    two and "no rollout found" to the others."""
+    payload = err.payload if isinstance(err.payload, dict) else {}
+    message = str(payload.get("message") or "")
+    if "already has an active writer" in message:
+        return ThreadHeldElsewhere(
+            f"thread {tid} is open in another process: another Claude Desktop connection, the Codex app, "
+            f"codex in a terminal, or a script. codex lets one process write a thread at a time, and that "
+            f"process keeps the thread until it unloads it or exits. codex_poll still reads its latest "
+            f"results. To continue now, codex_fork it and use the new thread, which can be compacted too. "
+            f"Otherwise retry once that process lets go.")
+    if "no rollout found" in message or "thread not loaded" in message:
+        return ValueError(f"unknown thread '{tid}': codex has no saved thread with that id")
+    if "invalid session id" in message or "invalid thread id" in message:
+        return ValueError(f"'{tid}' is not a thread id")
+    return err
+
+
 def attach_thread(tid, cwd_override=None, mode=None, model_slug=None):
     """Take ownership of a thread this bridge is not currently tracking — pruned from
-    the local cache, or held over from a previous bridge process.
+    the local cache, or held over from a previous bridge process — before codex_submit
+    or codex_compact sends it work.
 
     resume, not read. `thread/read` returns a snapshot: it does not subscribe, and it
     does not replay the server requests the thread is already parked on, so a live
@@ -838,8 +872,7 @@ def attach_thread(tid, cwd_override=None, mode=None, model_slug=None):
         with APP.lock:
             if claimed and APP.threads.get(tid) is placeholder:
                 APP.threads.pop(tid, None)
-        raise ValueError(f"unknown thread '{tid}': codex could not resume it "
-                         f"({json.dumps(e.payload)[:200]})")
+        raise thread_access_error(tid, e) from None
 
     thread = res.get("thread") or {}
     cwd = cwd_override or res.get("cwd") or thread.get("cwd") or SCRATCH_ROOT
@@ -1475,10 +1508,12 @@ def codex_approve(args):
 
 def codex_interrupt(args):
     tid = args.get("thread")
-    with APP.lock:
-        st = APP.threads.get(tid)
+    st = _live_entry(tid)
     if st is None:
-        raise ValueError(f"unknown thread '{tid}'")
+        # Never seen, or held over from an earlier child: the turn it remembers died with
+        # that child, and a turn running in another process is not this bridge's to stop.
+        raise ValueError(f"thread {tid} is not running in this plugin: a turn running in another "
+                         f"process has to be stopped there")
     if not st.get("turn_id"):
         return {"thread": tid, "state": st["state"], "note": "no active turn"}
     APP.request("turn/interrupt", {"threadId": tid, "turnId": st["turn_id"]}, timeout=60)
@@ -1493,10 +1528,13 @@ def codex_compact(args):
     summary is taken at a clean point instead of halfway through an investigation.
     """
     tid = args.get("thread")
-    with APP.lock:
-        st = APP.threads.get(tid)
+    st = _live_entry(tid)
     if st is None:
-        st = attach_thread(tid)
+        # Missing, or held over from an earlier app-server child that has not loaded it:
+        # attach first, as codex_submit does, keeping the working directory it had.
+        with APP.lock:
+            stale = APP.threads.pop(tid, None)
+        st = attach_thread(tid, stale["cwd"] if stale else None)
     if st["state"] == "running" and st.get("turn_id"):
         raise ValueError(f"thread {tid} is mid-turn — compacting now would summarise the work "
                          f"in progress. Wait for the turn to finish, or codex_interrupt first.")

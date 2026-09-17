@@ -704,3 +704,84 @@ try:
 finally:
     del bridge.HANDLERS["_smoke_held"]
 print("smoke: codex_fork is on the surface; refusals carry their reason; guidance names fork and read-only poll")
+
+# --- 0.15.0: a thread codex will not hand over is explained, not called unknown --------
+_real_ensure, _real_request = bridge.APP.ensure, bridge.APP.request
+bridge.APP.ensure = lambda: None
+_sent = []
+_GATE = {"config": {"windows": {"sandbox": "unelevated"}}, "layers": []}   # the Windows runner gates on this
+
+def _refusing(message):
+    def fake(method, params, timeout=120):
+        _sent.append(method)
+        if method == "config/read":
+            return _GATE
+        if method == "thread/resume":
+            raise bridge.CodexError({"code": -32600, "message": message})
+        raise AssertionError(f"unexpected {method} after a refused resume")
+    return fake
+
+try:
+    for _message, _kind, _needle in (
+            ("thread t40 already has an active writer", bridge.ThreadHeldElsewhere, "codex_fork"),
+            ("no rollout found for thread id t40", ValueError, "unknown thread 't40'"),
+            ("invalid session id: invalid character", ValueError, "'t40' is not a thread id")):
+        for _tool, _args in (("codex_submit", {"prompt": "go", "model": "luna-medium", "thread": "t40"}),
+                             ("codex_compact", {"thread": "t40"})):
+            bridge.APP.request = _refusing(_message)
+            try:
+                bridge.HANDLERS[_tool](_args)
+                raise AssertionError(f"{_tool}: {_message!r} must refuse")
+            except ValueError as e:
+                assert type(e) is _kind and _needle in str(e), (_tool, _message, type(e).__name__, str(e))
+            assert "t40" not in bridge.APP.threads, f"{_tool}: a refused attach left a placeholder"
+    # over MCP the held refusal is an ordinary rejection that names its reason
+    bridge.APP.request = _refusing("thread t40 already has an active writer")
+    _resp = bridge.handle({"method": "tools/call", "params": {"name": "codex_compact", "arguments": {"thread": "t40"}}})
+    _body = json.loads(_resp["content"][0]["text"])
+    assert _resp.get("isError") and _body["outcome"] == "rejected" and _body["reason"] == "held_elsewhere", _body
+    assert _body["thread"] == "t40" and "another process" in _body["error"], _body
+    # anything codex did not explain is codex failing: verbatim, as a codex_error, with no reason
+    bridge.APP.request = _refusing("rollout file is corrupt")
+    _resp = bridge.handle({"method": "tools/call", "params": {"name": "codex_compact", "arguments": {"thread": "t40"}}})
+    _body = json.loads(_resp["content"][0]["text"])
+    assert _body["outcome"] == "codex_error", _body
+    assert _body["error"] == {"code": -32600, "message": "rollout file is corrupt"} and "reason" not in _body, _body
+
+    # an entry from an earlier app-server child is re-attached before compacting ...
+    def _stale_ok(method, params, timeout=120):
+        _sent.append(method)
+        return {"config/read": _GATE,
+                "thread/resume": {"thread": {"id": "t41", "status": {"type": "idle"},
+                                             "turns": [{"id": "u1", "status": "completed", "items": []}]},
+                                  "cwd": "/tmp"},
+                "thread/compact/start": {}}[method]
+    bridge.APP.request = _stale_ok
+    _sent.clear()
+    _old = bridge._new_thread_state("t41", "/tmp", "write", "luna-medium")
+    _old.update(state="completed", gen=bridge.APP.gen - 1)
+    bridge.APP.threads["t41"] = _old
+    bridge.codex_compact({"thread": "t41"})
+    assert [m for m in _sent if m != "config/read"] == ["thread/resume", "thread/compact/start"], _sent
+    assert bridge.APP.threads["t41"]["gen"] == bridge.APP.gen, "compaction must run on a re-attached entry"
+    # ... a live entry is compacted as it is ...
+    _sent.clear()
+    bridge.APP.threads["t41"]["state"] = "completed"
+    bridge.codex_compact({"thread": "t41"})
+    assert _sent == ["thread/compact/start"], _sent
+    # ... and interrupt never reaches codex for a thread this child is not running
+    _sent.clear()
+    _gone = bridge._new_thread_state("t42", "/tmp", "write", "luna-medium")
+    _gone.update(state="running", turn_id="u-gone", gen=bridge.APP.gen - 1)
+    bridge.APP.threads["t42"] = _gone
+    for _tid in ("t42", "t-never-seen"):
+        try:
+            bridge.codex_interrupt({"thread": _tid})
+            raise AssertionError(f"interrupt of {_tid} must be refused")
+        except ValueError as e:
+            assert f"thread {_tid} is not running in this plugin" in str(e), e
+    assert _sent == [], f"interrupt reached codex for a thread it is not running: {_sent}"
+finally:
+    bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
+    bridge.APP.threads.clear(); bridge.APP.requests.clear()
+print("smoke: refusals are classified; stale entries re-attach before compaction and are never interrupted")
