@@ -60,7 +60,7 @@ PROTOCOL_VERSION = "2024-11-05"
 
 INSTRUCTIONS = """Dispatch OpenAI codex as an interactive subagent on the user's machine.
 
-SESSIONS: codex_submit with no thread starts one and returns {thread, turn}; pass that thread back to add a turn (follow-up input, a correction, a new question) with full prior context. If the thread is mid-turn, the input steers the running turn instead.
+SESSIONS: codex_submit with no thread starts one and returns {thread, turn}; pass that thread back to add a turn (follow-up input, a correction, a new question) with full prior context. If the thread is mid-turn, the input steers the running turn instead, on that turn's model: a steer naming a different model is refused, so interrupt or wait, then submit.
 
 DURABLE: the thread id is the handle to the work. codex stores threads, not this bridge, so keep the id and pick the same thread up tomorrow or next week - codex_submit re-attaches it automatically and the answer carries resumed: true, and codex_poll reads its latest saved results without taking it (read_only: true). One process at a time can write a thread: when another process has it open - another Claude Desktop connection, the Codex app, codex in a terminal, a script - codex_submit and codex_compact answer reason held_elsewhere, and codex_fork copies its history to a new id you can continue at once. Record the thread id with whatever the work belongs to; it is the only thing needed to continue.
 
@@ -79,7 +79,7 @@ SIZE THE DELIVERABLE: ask for the answer as the turn's OUTPUT, not as a report f
 
 Then bound it, because a survey still grows with the surface unless the brief says otherwise. Give a hard cap (items or lines) and require an index. The cap is the part that works: budgeting one row per item still scales linearly, so a 5000-item sweep overruns any readable size anyway. So also say what happens when the items do NOT fit - counts and patterns plus the exceptions worth naming, never a truncated enumeration. A complete list nobody can read is a failed deliverable, not a thorough one.
 
-MODELS by task weight: luna-medium/high = scouting and mechanical extraction - scout here whatever the follow-up is, then hand the findings to the model that does the work. Shape it as a pyramid: many cheap scouts, one per area, each finishing inside its runway and returning findings verbatim; fewer, stronger threads then process those results, and so on up; terra-medium/high = everyday analysis, drafting, second opinions; sol-high/xhigh = complex implementation and debugging; astra-high/xhigh = GPT-6, the heavyweight for hard or ambiguous work, long-context runs, terminal-heavy agentic work, and independent review. max rarely improves on xhigh - reserve it for a problem xhigh has already failed. ultra (sol/astra) is not more than max: each agent runs at xhigh and proactive sub-agent delegation switches on - faster only when the work splits into substantial independent parts; on small or tightly-coupled work it costs more, takes as long, and is no better - max wins there.
+MODELS by task weight: luna-medium/high = GPT-6 Luna, scouting and mechanical extraction - scout here whatever the follow-up is, then hand the findings to the model that does the work. Shape it as a pyramid: many cheap scouts, one per area, each finishing inside its runway and returning findings verbatim; fewer, stronger threads then process those results, and so on up; terra-medium/high = everyday analysis, drafting, second opinions (GPT-6 has no Terra, so this also runs GPT-6 Luna); sol-high/xhigh = GPT-6 Sol, complex implementation and debugging; astra-high/xhigh = GPT-6 Astra, the heavyweight for hard or ambiguous work, long-context runs, terminal-heavy agentic work, and independent review. These family names always run the family's newest model. A pinned name - the model's own slug plus effort, e.g. gpt-5.6-sol-high or gpt-6.1-sol-xhigh - runs exactly that model; use one only when the user asks for a specific model. max rarely improves on xhigh - reserve it for a problem xhigh has already failed. ultra (sol/astra) is not more than max: each agent runs at xhigh and proactive sub-agent delegation switches on - faster only when the work splits into substantial independent parts; on small or tightly-coupled work it costs more, takes as long, and is no better - max wins there.
 
 WHERE IT WORKS: cwd is the one location knob - any existing directory, normally the folder the calling session is already in. Nothing to register: a new project or a worktree parked anywhere works immediately. Reads still see the surrounding repo; writes are confined to cwd, so point it at the repo for repo-wide work or at a subdirectory to contain the blast radius. Omit it for work that needs no repo (research, reasoning, throwaway code) and the thread gets a private scratch workspace - the result says workspace: scratch. mode is write (default) or read. Point concurrent write threads at different cwd (e.g. separate worktrees) and they cannot collide. On Windows the bridge dispatches only while codex's own sandbox is enabled; codex_check reports windows_sandbox and the fix when it is not.
 
@@ -97,15 +97,23 @@ APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, 
 
 RESULTS: completed carries output (text, or your schema's JSON) plus bridge-stamped provenance - trust that over anything the model says about itself. Errors come back verbatim, including schema rejections."""
 
-SERVER_INFO = {"name": "codex", "version": "0.15.0"}
+SERVER_INFO = {"name": "codex", "version": "0.16.0"}
 
 # Friendly slug -> (wire model, reasoning effort). One caller-facing knob; the
 # app-server takes them as separate per-turn fields.
 #
-# astra is GPT-6 (wire slug gpt-6-astra, codex >= 0.153.1), codex's own default model,
-# exposed from medium up through every effort the app-server advertises. `low` is
-# deliberately absent: a scout at astra depth is the wrong tool, luna is the scout.
-# The GPT-5.6 seats stay the curated subset they were.
+# Two kinds of name. A family seat (luna-high, sol-xhigh, ...) runs its family's newest
+# model, so a caller who asks for sol gets the current Sol without knowing its version.
+# sol is GPT-6 Sol and luna is GPT-6 Luna. GPT-6 has no Terra, so terra-* runs GPT-6 Luna
+# too, under the name callers already route by. A pinned name is the wire slug plus the
+# effort (gpt-5.6-sol-high) and always means exactly that model: it is for a caller who
+# asked for one. When a family moves to a new model, its seat line changes here, and the
+# old model stays reachable under its pinned names.
+#
+# astra is GPT-6 (wire slug gpt-6-astra, codex >= 0.153.1), exposed from medium up
+# through every effort the app-server advertises. `low` is deliberately absent: a scout
+# at astra depth is the wrong tool, luna is the scout. Every other family keeps the
+# curated rungs it always had, and a pinned name offers its family's rungs, no more.
 #
 # The effort names are codex's own, verbatim from `model/list`.supportedReasoningEfforts.
 # Two of them are not what they look like: `ultra` never reaches the wire — codex sends
@@ -114,20 +122,20 @@ SERVER_INFO = {"name": "codex", "version": "0.15.0"}
 # Getting one wrong is not caught here: thread/start accepts any string (an invented
 # effort survives all the way to turn time, then fails against the API), so this table
 # is the only thing standing between a caller and an opaque mid-turn error.
-MODELS = {
-    "astra-medium": ("gpt-6-astra", "medium"),
-    "astra-high": ("gpt-6-astra", "high"),
-    "astra-xhigh": ("gpt-6-astra", "xhigh"),
-    "astra-max": ("gpt-6-astra", "max"),
-    "astra-ultra": ("gpt-6-astra", "ultra"),
-    "luna-medium": ("gpt-5.6-luna", "medium"),
-    "luna-high": ("gpt-5.6-luna", "high"),
-    "terra-medium": ("gpt-5.6-terra", "medium"),
-    "terra-high": ("gpt-5.6-terra", "high"),
-    "sol-high": ("gpt-5.6-sol", "high"),
-    "sol-xhigh": ("gpt-5.6-sol", "xhigh"),
-    "sol-ultra": ("gpt-5.6-sol", "ultra"),
-}
+_RUNGS = {"astra": ("medium", "high", "xhigh", "max", "ultra"),
+          "sol": ("high", "xhigh", "ultra"),
+          "luna": ("medium", "high"),
+          "terra": ("medium", "high")}
+# family -> its newest model. Order matters to WIRE_TO_SLUG: luna before terra, so a
+# thread on GPT-6 Luna reads back as luna's seat.
+_SEATS = {"astra": "gpt-6-astra", "sol": "gpt-6-sol", "luna": "gpt-6-luna", "terra": "gpt-6-luna"}
+# wire model -> the family whose rungs its pinned names offer
+_PINNED = {"gpt-6-astra": "astra", "gpt-6.1-sol": "sol", "gpt-6-sol": "sol", "gpt-6-luna": "luna",
+           "gpt-5.6-sol": "sol", "gpt-5.6-terra": "terra", "gpt-5.6-luna": "luna"}
+MODELS = {f"{family}-{effort}": (wire, effort)
+          for family, wire in _SEATS.items() for effort in _RUNGS[family]}
+MODELS.update({f"{wire}-{effort}": (wire, effort)
+               for wire, family in _PINNED.items() for effort in _RUNGS[family]})
 
 MODES = ("read", "write")
 
@@ -808,7 +816,13 @@ def pending_for(tid):
     return [r["view"] for r in APP.requests.values() if r["thread"] == tid]
 
 
-WIRE_TO_SLUG = {(m, e): slug for slug, (m, e) in MODELS.items()}
+# (wire model, effort) -> the name a thread reads back as when codex reports only the
+# pair (resume, read, fork). The first name wins: a family seat over a pinned name, luna
+# over its terra alias. A thread that ran on a model the seats have since left therefore
+# reads back pinned, as the model it really ran on, and a fork of it stays there.
+WIRE_TO_SLUG = {}
+for _slug, _pair in MODELS.items():
+    WIRE_TO_SLUG.setdefault(_pair, _slug)
 
 
 def _live_entry(tid):
@@ -886,8 +900,9 @@ def attach_thread(tid, cwd_override=None, mode=None, model_slug=None):
         st["workspace"] = "scratch" if str(cwd).startswith(SCRATCH_ROOT) else "project"
         st["gen"] = APP.gen
         # Real values off the resume response — the whole reason to prefer it over read.
-        st["model"] = model_slug or WIRE_TO_SLUG.get(
-            (res.get("model"), res.get("reasoningEffort")), res.get("model"))
+        # Never the name the caller is about to run: until that turn starts, the thread's
+        # last work ran on this, and a turn that fails to start must not relabel it.
+        st["model"] = WIRE_TO_SLUG.get((res.get("model"), res.get("reasoningEffort")), res.get("model"))
         # mode is deliberately NOT inferred from res["sandbox"]: that is the thread's
         # stored default, while every turn carries its own sandboxPolicy, so a thread
         # whose turns all ran workspace-write still reports readOnly here. Unknown until
@@ -1314,6 +1329,16 @@ def codex_submit(args):
                     f"{', '.join(ignored)} cannot apply to a turn already in flight. "
                     f"Drop {'it' if len(ignored) == 1 else 'them'} to steer, or wait for "
                     f"the turn to finish and submit a new one.")
+            # The model is required on every submit, so it cannot be dropped: a name for the
+            # running turn's own model steers, any other model is refused. Accepting it would
+            # run the user's input on a model they did not ask for.
+            running = MODELS.get(st["model"])
+            if running is not None and MODELS[model_slug] != running:
+                raise ValueError(
+                    f"thread {tid} is mid-turn on {st['model']}, so this input steers the running "
+                    f"turn, which cannot change model. Pass model {st['model']} to steer it; to run "
+                    f"{model_slug} instead, stop the turn with codex_interrupt (or wait for it to "
+                    f"finish) and submit again.")
             APP.request("turn/steer", {"threadId": tid, "expectedTurnId": st["turn_id"],
                                        "input": build_input(prompt, args.get("images"), st["cwd"], skill_items)})
             return {"thread": tid, "turn": st["turn_id"], "state": "running", "steered": True}
@@ -1719,7 +1744,7 @@ TOOLS = [
     {
         "name": "codex_submit",
         "description": ("Start a codex thread or add a turn to one. No thread → new session; a thread that is idle → "
-                        "next turn with full prior context; a thread mid-turn → the input steers the running turn. "
+                        "next turn with full prior context; a thread mid-turn → the input steers the running turn, which keeps its model (a different model is refused: interrupt or wait first). "
                         "Returns instantly: poll with codex_poll. Pass output_schema on any turn to get JSON back. Inject a plugin skill "
                         "with skills (codex_capabilities lists their names). A thread another process has open — "
                         "another Claude Desktop connection, the Codex app, codex in a terminal, a script — is refused "
@@ -1727,7 +1752,7 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "prompt": {"type": "string", "description": "The instruction. For a new thread this is all codex sees — make it self-contained. Ask for the answer as output rather than a report file, and if it covers many items bound it here — cap, index, and what to do when they do not fit. Nothing else will."},
             "model": {"type": "string", "enum": sorted(MODELS),
-                      "description": "luna=scouting, then hand findings to the model that does the work; terra=everyday work; sol=complex implementation; astra=GPT-6 heavyweight for hard, long-context or agentic work and independent review. Effort: high/xhigh are the working range; max rarely improves on xhigh; ultra = xhigh plus proactive sub-agent delegation, for work that splits into substantial independent parts (max for small or tightly-coupled work)."},
+                      "description": "luna=GPT-6 Luna, scouting, then hand findings to the model that does the work; terra=everyday work, also on GPT-6 Luna; sol=GPT-6 Sol, complex implementation; astra=GPT-6 Astra, heavyweight for hard, long-context or agentic work and independent review. Family names always run the family's newest model. A pinned name (model slug plus effort, e.g. gpt-5.6-sol-high) runs exactly that model: use it only when the user asks for a specific model. Effort: high/xhigh are the working range; max rarely improves on xhigh; ultra = xhigh plus proactive sub-agent delegation, for work that splits into substantial independent parts (max for small or tightly-coupled work)."},
             "thread": {"type": "string", "description": "Continue this thread. Omit to start a new one."},
             "cwd": {"type": "string", "description": "Absolute path to the directory to work in — normally the folder this session is already in. Any existing directory works; nothing needs registering. Reads still see the surrounding repo; writes are confined here, so aim it at the narrowest directory the writes should reach. Omit for work that needs no repo (research, reasoning, throwaway code): the thread gets a private scratch workspace. Point concurrent write threads at different cwd (e.g. worktrees) and they cannot collide."},
             "mode": {"type": "string", "enum": list(MODES), "description": "write (default) or read. Both keep network access (always on) and the full tool surface."},
@@ -1827,7 +1852,7 @@ def handle(req):
             "arguments": [
                 {"name": "cwd", "description": "Absolute path to work in; omit for a scratch workspace", "required": False},
                 {"name": "goal", "description": "What codex should do and report", "required": True},
-                {"name": "model", "description": "luna-medium (scout) / terra-high (everyday) / sol-xhigh (complex) / astra-xhigh (heavy, default) / astra-ultra (full run, self-delegates)", "required": False},
+                {"name": "model", "description": "luna-medium (scout) / terra-high (everyday) / sol-xhigh (complex) / astra-xhigh (heavy, default) / astra-ultra (full run, self-delegates); a pinned name such as gpt-5.6-sol-high runs exactly that model", "required": False},
                 {"name": "mode", "description": "write (default) or read", "required": False},
             ]}]}
     if method == "prompts/get":

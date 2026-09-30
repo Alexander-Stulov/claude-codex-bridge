@@ -13,9 +13,11 @@ was observed to on 0.153.4:
     context_window for that model, or codex's 258400 fallback for a slug the loaded
     catalog does not carry.
 
-The break the scenarios catch: a script that copies the cache without lifting the
+The breaks the scenarios catch: a script that copies the cache without lifting the
 override first can never see a model that appeared after the override went in. That
-is exactly how gpt-6-astra stayed at 258400 while the script kept printing OK.
+is exactly how gpt-6-astra stayed at 258400 while the script kept printing OK. And a
+script whose RAISE list predates a model copies it into the catalog but leaves it at
+the stock cap, which is where GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna were left.
 """
 import json, os, shutil, subprocess, sys, tempfile
 
@@ -32,10 +34,13 @@ def model(slug, ctx=272000, cap=872000, vis="list"):
             "input_modalities": ["text"]}
 
 GPT56 = [model("gpt-5.6-sol"), model("gpt-5.6-terra"), model("gpt-5.6-luna")]
+GPT6 = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]  # codex 0.159.0's order
 OTHERS = [model("gpt-5.5", cap=272000), model("codex-auto-review", vis="hide")]
 STALE = GPT56 + OTHERS                                         # the cache from before astra
-FRESH = [model("gpt-6-astra"), model("gpt-reserve", vis="hide")] + GPT56 + OTHERS
+SEP6 = [model("gpt-6-astra"), model("gpt-reserve", vis="hide")] + GPT56 + OTHERS   # astra, no 6-sol/luna/6.1
+FRESH = [model(s) for s in GPT6] + [model("gpt-reserve", vis="hide")] + GPT56 + OTHERS
 BUNDLED = FRESH + [model("gpt-daybreak-blue-latest")]         # what a logged-out CLI prints
+OLD_RAISE = ("gpt-6-astra", "gpt-5.6-")                        # what the script raised before GPT-6 Sol
 
 FAKE = r'''
 import datetime, json, os, re, sys, uuid
@@ -109,14 +114,14 @@ def make_fake_bin():
 FAKE_BIN = make_fake_bin()
 
 
-def write_home(cache, override, remote, no_debug_models=False):
+def write_home(cache, override, remote, no_debug_models=False, prior=STALE):
     home = tempfile.mkdtemp(prefix="codex-home-")
     catalog = os.path.join(home, "catalog-1m.json")
     lines = ['model = "gpt-5.6-sol"', 'model_reasoning_effort = "high"', ""]
-    if override:                           # a previous run's output, built from STALE
+    if override:                           # a previous run's output, built from `prior`
         lines.append('model_catalog_json = "%s"' % catalog.replace(os.sep, "/"))
         raised = [dict(m, context_window=TARGET, max_context_window=TARGET)
-                  if m["slug"].startswith("gpt-5.6-") else m for m in STALE]
+                  if m["slug"].startswith(OLD_RAISE) else m for m in prior]
         json.dump({"models": raised}, open(catalog, "w"), indent=1)
     lines += ['[plugins."x"]', "enabled = true", ""]
     open(os.path.join(home, "config.toml"), "w").write("\n".join(lines))
@@ -174,12 +179,12 @@ def scenario_installed_override_sees_new_model(kind, cmd):
         "%s: astra missing from the rebuilt catalog: the cache was copied without being "
         "refreshed first, so a model that appeared after the override went in is invisible"
         % kind + transcript(r))
-    assert (by["gpt-6-astra"]["context_window"], by["gpt-6-astra"]["max_context_window"]) == (TARGET, TARGET), by["gpt-6-astra"]
-    for s in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+    for s in GPT6 + ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]:
         assert (by[s]["context_window"], by[s]["max_context_window"]) == (TARGET, TARGET), by[s]
-    assert by["gpt-5.5"]["context_window"] == 272000 and by["codex-auto-review"]["context_window"] == 272000, \
-        "only the RAISE families move"
-    assert "4 raised" in r.stdout and "gpt-6-astra" in r.stdout, transcript(r)
+    stock = {m["slug"]: m for m in FRESH}
+    for s in ("gpt-5.5", "codex-auto-review", "gpt-reserve"):
+        assert by[s] == stock[s], "only the RAISE models move: %r" % by[s]
+    assert "7 raised" in r.stdout and "gpt-6-astra" in r.stdout, transcript(r)
     assert "on gpt-6-astra" in r.stdout, "the live check must run on the flagship once it is raised" + transcript(r)
     assert "OK" in r.stdout and "997500" in r.stdout, transcript(r)
     assert not warnings(r), warnings(r)
@@ -193,9 +198,12 @@ def scenario_missing_family_is_called_out(kind, cmd):
     assert r.returncode == 0, kind + transcript(r)
     by = catalog_of(home)
     assert "gpt-6-astra" not in by and by["gpt-5.6-sol"]["context_window"] == TARGET, by.keys()
-    assert "3 raised" in r.stdout and "on gpt-5.6-sol" in r.stdout, transcript(r)
-    assert any("gpt-6-astra" in l for l in warnings(r)), (
+    assert "6 raised" in r.stdout and "on gpt-6.1-sol" in r.stdout, (
+        "%s: without astra the live check moves to the next raised model in RAISE order" % kind + transcript(r))
+    w = warnings(r)
+    assert any("gpt-6-astra" in l for l in w), (
         "%s: a RAISE family that matched nothing must be called out, not silently skipped" % kind + transcript(r))
+    assert len(w) == 1, "%s: only the missing model is called out: %r" % (kind, w)
     check_config(home, kind)
 
 
@@ -205,7 +213,8 @@ def scenario_first_run_needs_no_prior_codex_run(kind, cmd):
     r = run(cmd, home)
     assert r.returncode == 0, "%s: a first run must not demand a prior codex run" % kind + transcript(r)
     by = catalog_of(home)
-    assert by["gpt-6-astra"]["context_window"] == TARGET and by["gpt-5.6-luna"]["context_window"] == TARGET, by.keys()
+    for s in GPT6 + ["gpt-5.6-luna"]:
+        assert by[s]["context_window"] == TARGET, by[s]
     check_config(home, kind)
 
 
@@ -218,7 +227,32 @@ def scenario_old_cli_falls_back_to_cache(kind, cmd):
     assert "gpt-6-astra" not in by and by["gpt-5.6-terra"]["context_window"] == TARGET, by.keys()
     w = warnings(r)
     assert any("refresh" in l.lower() for l in w), "%s: an unrefreshed cache must be reported" % kind + transcript(r)
-    assert any("gpt-6-astra" in l for l in w), transcript(r)
+    for s in GPT6:
+        assert any(s + "*" in l for l in w), "%s: %s missing from the cache must be called out" % (kind, s) + transcript(r)
+    assert "on gpt-5.6-sol" in r.stdout, transcript(r)
+    check_config(home, kind)
+
+
+# --- F: the catalog from before GPT-6 Sol: the new models appear, and at 1.05M ----------
+# The report this covers: an override built on 2026-09-06 (astra and the GPT-5.6 seats
+# raised) kept GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna out of codex's model list, and a
+# script that only knew astra and GPT-5.6 copied them in at the stock 272000 cap.
+def scenario_new_gpt6_models_listed_and_raised(kind, cmd):
+    home = write_home(cache=SEP6, override=True, remote=FRESH, prior=SEP6)
+    before = catalog_of(home)
+    assert "gpt-6-sol" not in before and before["gpt-6-astra"]["context_window"] == TARGET, before.keys()
+    r = run(cmd, home)
+    assert r.returncode == 0, kind + transcript(r)
+    by = catalog_of(home)
+    for s in ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"):
+        assert s in by, "%s: %s missing from the rebuilt catalog, so codex never lists it" % (kind, s) + transcript(r)
+        assert (by[s]["context_window"], by[s]["max_context_window"]) == (TARGET, TARGET), (
+            "%s: %s listed but left at the stock cap: %r" % (kind, s, by[s]) + transcript(r))
+        assert s in r.stdout, "%s: %s must be in the raised list the script prints" % (kind, s) + transcript(r)
+    assert [m["slug"] for m in json.load(open(os.path.join(home, "catalog-1m.json")))["models"]] == \
+        [m["slug"] for m in FRESH], "the catalog keeps codex's model order (its picker follows it)"
+    assert "7 raised" in r.stdout and "on gpt-6-astra" in r.stdout, transcript(r)
+    assert not warnings(r), warnings(r)
     check_config(home, kind)
 
 
@@ -239,6 +273,7 @@ SCENARIOS = [
     ("first run needs no prior codex run", scenario_first_run_needs_no_prior_codex_run),
     ("old cli falls back to the cache", scenario_old_cli_falls_back_to_cache),
     ("failure restores config", scenario_failure_restores_config),
+    ("new GPT-6 models listed and raised", scenario_new_gpt6_models_listed_and_raised),
 ]
 
 
