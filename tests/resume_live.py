@@ -111,7 +111,9 @@ print(f"   poll-only read -> read_only={peek.get('read_only')} state={peek['stat
 assert peek.get("read_only") is True and "resumed" not in peek, peek
 assert t not in [x["thread"] for x in c.call("codex_check", {})["threads"]], "a poll must not attach the thread"
 pv = peek.get("provenance") or {}
-assert pv.get("model_slug") != "luna-medium" or "terra" in str(pv.get("model")), \
+# terra-high runs GPT-6 Luna at high, so codex's record reads back as luna's seat at that
+# effort; attach's placeholder default is luna-medium, which would mean it was never read.
+assert (pv.get("model"), pv.get("model_slug")) == ("gpt-6-luna", "luna-high"), \
     f"attach fabricated a default model instead of reading it: {pv}"
 # mode is NOT inferable: thread/resume reports the thread's stored sandbox (readOnly by
 # default) while every turn carries its own sandboxPolicy. Unknown beats fabricated.

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Raise the codex context window for GPT-6 Astra and GPT-5.6 models to 1.05M (Windows).
+    Raise the codex context window for the GPT-6 and GPT-5.6 models to 1.05M (Windows).
 
 .DESCRIPTION
     Why a script and not a config line: codex clamps the documented override.
@@ -13,10 +13,14 @@
     flagship. The cap itself lives in the model catalog, and the only supported way
     to change it is to hand codex a whole catalog via `model_catalog_json`. That is
     what this does: it has codex fetch its catalog afresh, copies that, raises the
-    cap on every model the bridge dispatches to the 1,050,000 their upstream API
-    actually supports, and points config.toml at the copy.
+    cap on GPT-6.1 Sol, GPT-6 Astra, Sol and Luna and GPT-5.6 Sol, Terra and Luna to
+    the 1,050,000 their upstream API actually supports, and points config.toml at the
+    copy.
 
-    Run once. Re-run after a codex upgrade, so the copy picks up new models.
+    Run once. Re-run after a codex upgrade, and whenever OpenAI releases a model: the
+    copy is also codex's model list, so codex shows only the models it held the day
+    it was built. A later model (as GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna were) stays
+    out of every model picker until this runs again.
     Same behaviour as enable-1m-context.sh; this edition needs only PowerShell
     (Windows PowerShell 5.1, or PowerShell 7.2 or newer) and codex.
 
@@ -48,10 +52,14 @@ $cache   = Join-Path $codexHome "models_cache.json"
 $catalog = Join-Path $codexHome "catalog-1m.json"
 $config  = Join-Path $codexHome "config.toml"
 $targetWindow = 1050000
-# Every wire model this bridge can dispatch that supports the 1.05M upstream window.
-# A prefix list, not one family: gpt-6-astra ships capped exactly like the GPT-5.6
-# seats, so gating on "gpt-5.6-" alone would leave the flagship silently at 258400.
-$raise = @("gpt-6-astra", "gpt-5.6-")
+# Every codex model known to take the 1.05M upstream window. They all ship capped
+# alike, so a model missing here is copied in at the stock cap and runs at 258400
+# with nothing said. The GPT-6 models are listed one by one, not by a "gpt-6"
+# prefix: a raised cap is only safe on a model known to take 1.05M upstream, so a
+# new line (a GPT-6.2, say) is added here once it is. Each entry still matches as a
+# prefix, so a variant of a listed model (gpt-6-sol-*) is raised with it. Order is
+# the live check's preference.
+$raise = @("gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-")
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)   # a BOM would break codex's parsers
 $script:liftedConfig = $null     # config.toml's bytes while the override is lifted, until it is re-set
 
