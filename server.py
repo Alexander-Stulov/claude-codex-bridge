@@ -97,7 +97,7 @@ APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, 
 
 RESULTS: completed carries output (text, or your schema's JSON) plus bridge-stamped provenance - trust that over anything the model says about itself. Errors come back verbatim, including schema rejections."""
 
-SERVER_INFO = {"name": "codex", "version": "0.16.0"}
+SERVER_INFO = {"name": "codex", "version": "0.16.1"}
 
 # Friendly slug -> (wire model, reasoning effort). One caller-facing knob; the
 # app-server takes them as separate per-turn fields.
@@ -110,10 +110,11 @@ SERVER_INFO = {"name": "codex", "version": "0.16.0"}
 # asked for one. When a family moves to a new model, its seat line changes here, and the
 # old model stays reachable under its pinned names.
 #
-# astra is GPT-6 (wire slug gpt-6-astra, codex >= 0.153.1), exposed from medium up
-# through every effort the app-server advertises. `low` is deliberately absent: a scout
-# at astra depth is the wrong tool, luna is the scout. Every other family keeps the
-# curated rungs it always had, and a pinned name offers its family's rungs, no more.
+# astra (GPT-6, wire slug gpt-6-astra, codex >= 0.153.1) and sol are exposed from medium
+# up through every effort the app-server advertises, ultra included. `low` is deliberately
+# absent: a scout at that depth is the wrong tool, luna is the scout. luna runs low
+# through max (codex offers it no ultra). terra keeps the curated rungs it always had,
+# and a pinned name offers its family's rungs, no more.
 #
 # The effort names are codex's own, verbatim from `model/list`.supportedReasoningEfforts.
 # Two of them are not what they look like: `ultra` never reaches the wire — codex sends
@@ -123,8 +124,8 @@ SERVER_INFO = {"name": "codex", "version": "0.16.0"}
 # effort survives all the way to turn time, then fails against the API), so this table
 # is the only thing standing between a caller and an opaque mid-turn error.
 _RUNGS = {"astra": ("medium", "high", "xhigh", "max", "ultra"),
-          "sol": ("high", "xhigh", "ultra"),
-          "luna": ("medium", "high"),
+          "sol": ("medium", "high", "xhigh", "max", "ultra"),
+          "luna": ("low", "medium", "high", "xhigh", "max"),
           "terra": ("medium", "high")}
 # family -> its newest model. Order matters to WIRE_TO_SLUG: luna before terra, so a
 # thread on GPT-6 Luna reads back as luna's seat.

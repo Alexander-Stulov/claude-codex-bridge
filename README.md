@@ -188,14 +188,15 @@ reached the bridge (not only `codex exec`), run `python3 tests/context_live.py`.
 
 Models. A family name always runs that family's newest model:
 `astra-medium|astra-high|astra-xhigh|astra-max|astra-ultra` (GPT-6 Astra) ·
-`sol-high|sol-xhigh|sol-ultra` (GPT-6 Sol) · `luna-medium|luna-high` (GPT-6 Luna) ·
+`sol-medium|sol-high|sol-xhigh|sol-max|sol-ultra` (GPT-6 Sol) ·
+`luna-low|luna-medium|luna-high|luna-xhigh|luna-max` (GPT-6 Luna) ·
 `terra-medium|terra-high`. GPT-6 has no Terra, so terra runs GPT-6 Luna as well. The
 name is kept because callers already route work by it.
 
 To run one specific model, pin it by name: the model's own slug plus the effort. The
-pinned names are `gpt-6.1-sol-high|xhigh|ultra`, `gpt-6-sol-high|xhigh|ultra`,
-`gpt-6-luna-medium|high`, `gpt-6-astra-medium|…|ultra`, `gpt-5.6-sol-high|xhigh|ultra`,
-`gpt-5.6-terra-medium|high` and `gpt-5.6-luna-medium|high`. A pinned name offers the
+pinned names are `gpt-6.1-sol-medium|…|ultra`, `gpt-6-sol-medium|…|ultra`,
+`gpt-6-luna-low|…|max`, `gpt-6-astra-medium|…|ultra`, `gpt-5.6-sol-medium|…|ultra`,
+`gpt-5.6-terra-medium|high` and `gpt-5.6-luna-low|…|max`. A pinned name offers the
 same effort levels as its family, and it never moves when the family does. The tool
 description tells callers to use one only when the user asks for a specific model.
 
@@ -221,8 +222,9 @@ fewer, stronger threads then process those results, and so on up. Split for
 parallelism, not for length — coherent, closely-coupled work belongs in one thread,
 and what matters survives compaction.
 
-`astra-*` is GPT-6 Astra (codex 0.153.1+), exposed from
-`medium` up — there is no `astra-low`; Luna is the scout. `max` rarely improves on `xhigh`. `ultra` (Sol
+`astra-*` is GPT-6 Astra (codex 0.153.1+). Astra and Sol are exposed from
+`medium` up to `ultra` — there is no `astra-low` or `sol-low`; Luna is the scout, and
+runs `low` through `max` (codex offers Luna no `ultra`). `max` rarely improves on `xhigh`. `ultra` (Sol
 and Astra) is not "more than max": each agent runs at `xhigh` and proactive
 sub-agent delegation switches on — breadth, not depth. It pays only when the work
 splits into substantial independent parts; on small or tightly-coupled work it
