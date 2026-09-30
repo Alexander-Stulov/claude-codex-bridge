@@ -88,11 +88,14 @@ assert "app_server_running" not in check, "bare running-boolean invites a false 
 if not _win_with_codex:
     assert check["app_server"].startswith("idle"), check["app_server"]  # lazy spawn: idle before any submit
 assert "sol-ultra" in check["models"] and "luna-medium" in check["models"], check["models"]
-# astra is the flagship seat and the only family carrying codex's whole thinking
-# ladder — the point of the family, so pin every rung rather than a sample.
-assert {f"astra-{e}" for e in ("medium", "high", "xhigh", "max", "ultra")} \
-    <= set(check["models"]), check["models"]
-assert "astra-low" not in check["models"], "astra starts at medium — luna is the scout"
+# astra and sol carry codex's thinking ladder from medium through ultra, luna from low
+# through max — pin every rung rather than a sample.
+for _fam in ("astra", "sol"):
+    assert {f"{_fam}-{e}" for e in ("medium", "high", "xhigh", "max", "ultra")} \
+        <= set(check["models"]), check["models"]
+    assert f"{_fam}-low" not in check["models"], f"{_fam} starts at medium — luna is the scout"
+assert {f"luna-{e}" for e in ("low", "medium", "high", "xhigh", "max")} <= set(check["models"]), check["models"]
+assert "luna-ultra" not in check["models"], "codex offers luna no ultra"
 assert "gpt-6-astra-low" not in check["models"], "a pinned name offers its family's rungs, no more"
 assert {"gpt-5.6-sol-high", "gpt-6.1-sol-xhigh"} <= set(check["models"]), check["models"]
 
@@ -316,17 +319,19 @@ print(f"smoke: {len(bridge.MODELS)} model slugs round-trip through WIRE_TO_SLUG"
 # A caller who asks for a family gets its newest model without knowing the version:
 # sol is GPT-6 Sol, luna is GPT-6 Luna, and terra (GPT-6 has no Terra) runs GPT-6 Luna.
 # A caller who names a model gets exactly that model, at every rung its family offers.
-for _e in ("medium", "high"):
+for _e in ("low", "medium", "high", "xhigh", "max"):
     assert bridge.MODELS[f"luna-{_e}"] == ("gpt-6-luna", _e), bridge.MODELS[f"luna-{_e}"]
+for _e in ("medium", "high"):
     assert bridge.MODELS[f"terra-{_e}"] == ("gpt-6-luna", _e), bridge.MODELS[f"terra-{_e}"]
-for _e in ("high", "xhigh", "ultra"):
+for _e in ("medium", "high", "xhigh", "max", "ultra"):
     assert bridge.MODELS[f"sol-{_e}"] == ("gpt-6-sol", _e), bridge.MODELS[f"sol-{_e}"]
 for _e in ("medium", "high", "xhigh", "max", "ultra"):
     assert bridge.MODELS[f"astra-{_e}"] == ("gpt-6-astra", _e), bridge.MODELS[f"astra-{_e}"]
-_PINNED = {"gpt-6-astra": ("medium", "high", "xhigh", "max", "ultra"),
-           "gpt-6.1-sol": ("high", "xhigh", "ultra"), "gpt-6-sol": ("high", "xhigh", "ultra"),
-           "gpt-6-luna": ("medium", "high"), "gpt-5.6-sol": ("high", "xhigh", "ultra"),
-           "gpt-5.6-terra": ("medium", "high"), "gpt-5.6-luna": ("medium", "high")}
+_FULL = ("medium", "high", "xhigh", "max", "ultra")
+_LUNA = ("low", "medium", "high", "xhigh", "max")
+_PINNED = {"gpt-6-astra": _FULL, "gpt-6.1-sol": _FULL, "gpt-6-sol": _FULL,
+           "gpt-6-luna": _LUNA, "gpt-5.6-sol": _FULL,
+           "gpt-5.6-terra": ("medium", "high"), "gpt-5.6-luna": _LUNA}
 _pinned_names = {s for s in bridge.MODELS if s.startswith("gpt-")}
 assert _pinned_names == {f"{w}-{e}" for w, es in _PINNED.items() for e in es}, sorted(_pinned_names ^ {
     f"{w}-{e}" for w, es in _PINNED.items() for e in es})
