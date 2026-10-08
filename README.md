@@ -188,7 +188,7 @@ reached the bridge (not only `codex exec`), run `python3 tests/context_live.py`.
 
 Models. A family name always runs that family's newest model:
 `astra-medium|astra-high|astra-xhigh|astra-max|astra-ultra` (GPT-6 Astra) ·
-`sol-medium|sol-high|sol-xhigh|sol-max|sol-ultra` (GPT-6 Sol) ·
+`sol-medium|sol-high|sol-xhigh|sol-max|sol-ultra` (GPT-6.1 Sol) ·
 `luna-low|luna-medium|luna-high|luna-xhigh|luna-max` (GPT-6 Luna) ·
 `terra-medium|terra-high`. GPT-6 has no Terra, so terra runs GPT-6 Luna as well. The
 name is kept because callers already route work by it.
