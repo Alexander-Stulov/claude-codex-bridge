@@ -317,14 +317,14 @@ print(f"smoke: {len(bridge.MODELS)} model slugs round-trip through WIRE_TO_SLUG"
 
 # --- 0.16.0: family seats follow the newest model; a pinned name never moves ---------
 # A caller who asks for a family gets its newest model without knowing the version:
-# sol is GPT-6 Sol, luna is GPT-6 Luna, and terra (GPT-6 has no Terra) runs GPT-6 Luna.
+# sol is GPT-6.1 Sol, luna is GPT-6 Luna, and terra (GPT-6 has no Terra) runs GPT-6 Luna.
 # A caller who names a model gets exactly that model, at every rung its family offers.
 for _e in ("low", "medium", "high", "xhigh", "max"):
     assert bridge.MODELS[f"luna-{_e}"] == ("gpt-6-luna", _e), bridge.MODELS[f"luna-{_e}"]
 for _e in ("medium", "high"):
     assert bridge.MODELS[f"terra-{_e}"] == ("gpt-6-luna", _e), bridge.MODELS[f"terra-{_e}"]
 for _e in ("medium", "high", "xhigh", "max", "ultra"):
-    assert bridge.MODELS[f"sol-{_e}"] == ("gpt-6-sol", _e), bridge.MODELS[f"sol-{_e}"]
+    assert bridge.MODELS[f"sol-{_e}"] == ("gpt-6.1-sol", _e), bridge.MODELS[f"sol-{_e}"]
 for _e in ("medium", "high", "xhigh", "max", "ultra"):
     assert bridge.MODELS[f"astra-{_e}"] == ("gpt-6-astra", _e), bridge.MODELS[f"astra-{_e}"]
 _FULL = ("medium", "high", "xhigh", "max", "ultra")
@@ -337,14 +337,14 @@ assert _pinned_names == {f"{w}-{e}" for w, es in _PINNED.items() for e in es}, s
     f"{w}-{e}" for w, es in _PINNED.items() for e in es})
 # a thread that ran on a model the seats have since left comes back pinned, so a fork or
 # a read reports — and keeps — the model it really ran on
-for _old in (("gpt-5.6-sol", "high"), ("gpt-5.6-terra", "high"), ("gpt-5.6-luna", "medium")):
+for _old in (("gpt-6-sol", "high"), ("gpt-5.6-sol", "high"), ("gpt-5.6-terra", "high"), ("gpt-5.6-luna", "medium")):
     assert bridge.WIRE_TO_SLUG[_old] == f"{_old[0]}-{_old[1]}", (_old, bridge.WIRE_TO_SLUG[_old])
 # the tool schema offers every name, and the guidance tells callers which kind to use
 _model_prop = next(t for t in bridge.TOOLS if t["name"] == "codex_submit")["inputSchema"]["properties"]["model"]
 assert _model_prop["enum"] == sorted(bridge.MODELS), _model_prop["enum"]
 for _where, _text in (("model description", _model_prop["description"]),
                       ("instructions", bridge.INSTRUCTIONS.split("MODELS by task weight")[1].split("\n")[0])):
-    for _phrase in ("GPT-6 Sol", "GPT-6 Luna", "gpt-5.6-sol-high", "only when"):
+    for _phrase in ("GPT-6.1 Sol", "GPT-6 Luna", "gpt-5.6-sol-high", "only when"):
         assert _phrase in _text, f"{_where} lost {_phrase!r}"
 
 # ... and that is the model the turn actually runs: the wire slug rides turn/start.
@@ -365,7 +365,7 @@ try:
         assert bridge._provenance(bridge.APP.threads["t35"])["model"] == bridge.MODELS[_slug][0]
     assert _sent_models == list(bridge.MODELS.values()), _sent_models
     assert _sent_models[:3] == [("gpt-6-astra", "medium"), ("gpt-6-astra", "high"), ("gpt-6-astra", "xhigh")]
-    assert ("gpt-6-sol", "xhigh") in _sent_models and ("gpt-6-luna", "medium") in _sent_models
+    assert ("gpt-6.1-sol", "xhigh") in _sent_models and ("gpt-6-luna", "medium") in _sent_models
 
     # A steer carries input only, so it cannot change the running turn's model. A name for
     # the same model steers; a different model is refused, never silently dropped — the
