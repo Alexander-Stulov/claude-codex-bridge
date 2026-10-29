@@ -17,7 +17,7 @@ The breaks the scenarios catch: a script that copies the cache without lifting t
 override first can never see a model that appeared after the override went in. That
 is exactly how gpt-6-astra stayed at 258400 while the script kept printing OK. And a
 script whose RAISE list predates a model copies it into the catalog but leaves it at
-the stock cap, which is where GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna were left.
+the stock cap, which is where GPT-6.1 Sol and Terra, GPT-6 Sol and GPT-6 Luna were left.
 """
 import json, os, shutil, subprocess, sys, tempfile
 
@@ -34,7 +34,7 @@ def model(slug, ctx=272000, cap=872000, vis="list"):
             "input_modalities": ["text"]}
 
 GPT56 = [model("gpt-5.6-sol"), model("gpt-5.6-terra"), model("gpt-5.6-luna")]
-GPT6 = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]  # codex 0.159.0's order
+GPT6 = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"]  # codex 0.165.0's order
 OTHERS = [model("gpt-5.5", cap=272000), model("codex-auto-review", vis="hide")]
 STALE = GPT56 + OTHERS                                         # the cache from before astra
 SEP6 = [model("gpt-6-astra"), model("gpt-reserve", vis="hide")] + GPT56 + OTHERS   # astra, no 6-sol/luna/6.1
@@ -184,7 +184,7 @@ def scenario_installed_override_sees_new_model(kind, cmd):
     stock = {m["slug"]: m for m in FRESH}
     for s in ("gpt-5.5", "codex-auto-review", "gpt-reserve"):
         assert by[s] == stock[s], "only the RAISE models move: %r" % by[s]
-    assert "7 raised" in r.stdout and "gpt-6-astra" in r.stdout, transcript(r)
+    assert "8 raised" in r.stdout and "gpt-6-astra" in r.stdout, transcript(r)
     assert "on gpt-6-astra" in r.stdout, "the live check must run on the flagship once it is raised" + transcript(r)
     assert "OK" in r.stdout and "997500" in r.stdout, transcript(r)
     assert not warnings(r), warnings(r)
@@ -198,7 +198,7 @@ def scenario_missing_family_is_called_out(kind, cmd):
     assert r.returncode == 0, kind + transcript(r)
     by = catalog_of(home)
     assert "gpt-6-astra" not in by and by["gpt-5.6-sol"]["context_window"] == TARGET, by.keys()
-    assert "6 raised" in r.stdout and "on gpt-6.1-sol" in r.stdout, (
+    assert "7 raised" in r.stdout and "on gpt-6.1-sol" in r.stdout, (
         "%s: without astra the live check moves to the next raised model in RAISE order" % kind + transcript(r))
     w = warnings(r)
     assert any("gpt-6-astra" in l for l in w), (
@@ -235,7 +235,7 @@ def scenario_old_cli_falls_back_to_cache(kind, cmd):
 
 # --- F: the catalog from before GPT-6 Sol: the new models appear, and at 1.05M ----------
 # The report this covers: an override built on 2026-09-06 (astra and the GPT-5.6 seats
-# raised) kept GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna out of codex's model list, and a
+# raised) kept GPT-6.1 Sol and Terra, GPT-6 Sol and GPT-6 Luna out of codex's model list, and a
 # script that only knew astra and GPT-5.6 copied them in at the stock 272000 cap.
 def scenario_new_gpt6_models_listed_and_raised(kind, cmd):
     home = write_home(cache=SEP6, override=True, remote=FRESH, prior=SEP6)
@@ -244,14 +244,14 @@ def scenario_new_gpt6_models_listed_and_raised(kind, cmd):
     r = run(cmd, home)
     assert r.returncode == 0, kind + transcript(r)
     by = catalog_of(home)
-    for s in ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"):
+    for s in ("gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"):
         assert s in by, "%s: %s missing from the rebuilt catalog, so codex never lists it" % (kind, s) + transcript(r)
         assert (by[s]["context_window"], by[s]["max_context_window"]) == (TARGET, TARGET), (
             "%s: %s listed but left at the stock cap: %r" % (kind, s, by[s]) + transcript(r))
         assert s in r.stdout, "%s: %s must be in the raised list the script prints" % (kind, s) + transcript(r)
     assert [m["slug"] for m in json.load(open(os.path.join(home, "catalog-1m.json")))["models"]] == \
         [m["slug"] for m in FRESH], "the catalog keeps codex's model order (its picker follows it)"
-    assert "7 raised" in r.stdout and "on gpt-6-astra" in r.stdout, transcript(r)
+    assert "8 raised" in r.stdout and "on gpt-6-astra" in r.stdout, transcript(r)
     assert not warnings(r), warnings(r)
     check_config(home, kind)
 
