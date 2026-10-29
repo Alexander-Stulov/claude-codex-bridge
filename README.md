@@ -132,9 +132,8 @@ From a checkout, run them in place: `./scripts/enable-1m-context.sh`, or
 Codex ships GPT-6.1 Sol and Terra at a **500,000**-token context window (475,000 after
 its 95% headroom), and GPT-6 Astra, Sol and Luna and GPT-5.6 Sol, Terra and Luna at
 **272,000** (258,400 effective), even though the models support **1,050,000** upstream.
-Astra is no exception: a fresh astra thread reports
-`model_context_window: 258400` until this script runs. The documented override does
-*not* lift it to 1.05M either:
+Astra is no exception: a fresh astra thread reports `model_context_window: 258400`
+until this script runs. The documented override does *not* lift it to 1.05M either:
 
 ```toml
 model_context_window = 1050000     # clamped to the catalog's max_context_window
@@ -148,16 +147,15 @@ via `model_catalog_json`. It then verifies with a one-word codex run — on the 
 model you are most likely to use — that the effective window really moved to
 **997,500**, and refuses to claim success otherwise.
 
-Run it once, then restart Claude Desktop — the catalog is read at app-server
-startup. The copy is also codex's model list: while `model_catalog_json` is set,
-codex stops fetching its catalog, so the Codex app and the CLI list only the models
-the copy held the day it was built. A model released since stays hidden —
-GPT-6.1 Sol and Terra, GPT-6 Sol and GPT-6 Luna did, on a copy from before them — until the
-script runs again. So re-run it after upgrading codex and whenever OpenAI releases a
-model: it lifts the override for that one catalog fetch and puts it back, and it says
-so, loudly, when a model it meant to raise is not in what codex fetched. A model from
-a line the script does not list yet — a GPT-6.2, say — is shown at the stock cap until
-the script adds it.
+Run it once, then restart Claude Desktop — the catalog is read at app-server startup.
+The copy is also codex's model list: while `model_catalog_json` is set, codex stops
+fetching its catalog, so the Codex app and the CLI list only the models the copy held
+the day it was built. A model released since stays hidden — GPT-6.1 Sol and Terra,
+GPT-6 Sol and GPT-6 Luna did, on a copy from before them — until the script runs again.
+So re-run it after upgrading codex and whenever OpenAI releases a model: it lifts the
+override for that one catalog fetch and puts it back, and it says so, loudly, when a
+model it meant to raise is not in what codex fetched. A model from a line the script
+does not list yet — a GPT-6.2, say — is shown at the stock cap until the script adds it.
 `--revert` restores the stock catalog; `--no-verify` skips the live check
 (`-Revert` and `-NoVerify` in the PowerShell edition).
 
@@ -194,11 +192,12 @@ Models. A family name always runs that family's newest model:
 `terra-medium|terra-high|terra-xhigh|terra-max|terra-ultra` (GPT-6.1 Terra).
 
 To run one specific model, pin it by name: the model's own slug plus the effort. The
-pinned names are `gpt-6.1-sol-medium|…|ultra`, `gpt-6.1-terra-medium|…|ultra`, `gpt-6-sol-medium|…|ultra`,
-`gpt-6-luna-low|…|max`, `gpt-6-astra-medium|…|ultra`, `gpt-5.6-sol-medium|…|ultra`,
-`gpt-5.6-terra-medium|…|ultra` and `gpt-5.6-luna-low|…|max`. A pinned name offers the
-same effort levels as its family, and it never moves when the family does. The tool
-description tells callers to use one only when the user asks for a specific model.
+pinned names are `gpt-6.1-sol-medium|…|ultra`, `gpt-6.1-terra-medium|…|ultra`,
+`gpt-6-sol-medium|…|ultra`, `gpt-6-luna-low|…|max`, `gpt-6-astra-medium|…|ultra`,
+`gpt-5.6-sol-medium|…|ultra`, `gpt-5.6-terra-medium|…|ultra` and `gpt-5.6-luna-low|…|max`.
+A pinned name offers the same effort levels as its family, and it never moves when
+the family does. The tool description tells callers to use one only when the user
+asks for a specific model.
 
 Some threads ran on a model their family has since left: a thread from before this
 change, or another client's thread. `codex_poll` and `codex_fork` report such a thread
@@ -207,10 +206,10 @@ ran on, and a fork stays on that model. A thread on a family's current model rea
 back under the family name.
 
 A steer is a submit to a thread whose turn is still running. It carries input only, so
-it cannot change that turn's model. Any name for the running model steers: `gpt-6-luna-high`
-on a `luna-high` turn runs the same model. A different model is refused rather than
-quietly ignored. To switch, stop the turn with `codex_interrupt`, or wait for it to
-finish, and then submit.
+it cannot change that turn's model. Any name for the running model steers:
+`gpt-6-luna-high` on a `luna-high` turn runs the same model. A different model is refused
+rather than quietly ignored. To switch, stop the turn with `codex_interrupt`, or wait
+for it to finish, and then submit.
 
 Scout with `luna-medium/high` whatever the follow-up is — gather context, locate
 the relevant code, extract facts — then hand the findings on: `terra-medium/high`
@@ -223,12 +222,12 @@ parallelism, not for length — coherent, closely-coupled work belongs in one th
 and what matters survives compaction.
 
 `astra-*` is GPT-6 Astra (codex 0.153.1+). Astra, Sol and Terra are exposed from
-`medium` up to `ultra` — there is no `astra-low`, `sol-low` or `terra-low`; Luna is the scout, and
-runs `low` through `max` (codex offers Luna no `ultra`). `max` rarely improves on `xhigh`. `ultra` (Sol,
-Terra and Astra) is not "more than max": each agent runs at `xhigh` and proactive
-sub-agent delegation switches on — breadth, not depth. It pays only when the work
-splits into substantial independent parts; on small or tightly-coupled work it
-costs more, takes as long, and is no better than `max`.
+`medium` up to `ultra` — there is no `astra-low`, `sol-low` or `terra-low`; Luna is the
+scout, and runs `low` through `max` (codex offers Luna no `ultra`). `max` rarely improves
+on `xhigh`. `ultra` (Sol, Terra and Astra) is not "more than max": each agent runs at
+`xhigh` and proactive sub-agent delegation switches on — breadth, not depth. It pays
+only when the work splits into substantial independent parts; on small or
+tightly-coupled work it costs more, takes as long, and is no better than `max`.
 
 `run-codex-job` defaults to `astra-xhigh`; `codex_submit` always requires an
 explicit model.

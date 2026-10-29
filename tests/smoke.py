@@ -292,9 +292,9 @@ print("smoke: thread id survives success, approval, and both failure paths")
 # --- model table round-trips ------------------------------------------------
 # WIRE_TO_SLUG is the ONLY way a thread gets a friendly slug back on the resume, read
 # and fork paths, where codex reports just the wire model and effort. Names share pairs
-# on purpose — a family's pinned names share its seats' pairs — so the invariant is
-# on pairs: every pair comes back, as a name that runs
-# exactly that pair, and as the family seat whenever one runs it.
+# on purpose — a family's pinned names share its seats' pairs — so the invariant is on
+# pairs: every pair comes back, as a name that runs exactly that pair, and as the family
+# seat whenever one runs it.
 assert set(bridge.WIRE_TO_SLUG) == set(bridge.MODELS.values()), (
     "a (wire model, effort) pair has no way back to a name: "
     f"{sorted(set(bridge.MODELS.values()) - set(bridge.WIRE_TO_SLUG))}")

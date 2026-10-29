@@ -235,8 +235,9 @@ def scenario_old_cli_falls_back_to_cache(kind, cmd):
 
 # --- F: the catalog from before GPT-6 Sol: the new models appear, and at 1.05M ----------
 # The report this covers: an override built on 2026-09-06 (astra and the GPT-5.6 seats
-# raised) kept GPT-6.1 Sol and Terra, GPT-6 Sol and GPT-6 Luna out of codex's model list, and a
+# raised) kept GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna out of codex's model list, and a
 # script that only knew astra and GPT-5.6 copied them in at the stock 272000 cap.
+# The same check now holds GPT-6.1 Terra, which such a catalog also hides.
 def scenario_new_gpt6_models_listed_and_raised(kind, cmd):
     home = write_home(cache=SEP6, override=True, remote=FRESH, prior=SEP6)
     before = catalog_of(home)

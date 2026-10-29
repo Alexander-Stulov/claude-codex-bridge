@@ -9,18 +9,18 @@
 
     and the shipped catalog caps every one of these models below that, so the
     override cannot reach 1,050,000. GPT-6.1 Sol and Terra ship at a 500000 window;
-    the older models ship at 272000 (258400 after codex's 95% headroom),
-    gpt-6-astra included. The cap itself lives in the model catalog, and the only supported way
+    the older models ship at 272000 (258400 after codex's 95% headroom), gpt-6-astra
+    included. The cap itself lives in the model catalog, and the only supported way
     to change it is to hand codex a whole catalog via `model_catalog_json`. That is
-    what this does: it has codex fetch its catalog afresh, copies that, raises the
-    cap on GPT-6.1 Sol and Terra, GPT-6 Astra, Sol and Luna and GPT-5.6 Sol, Terra and Luna to
-    the 1,050,000 their upstream API actually supports, and points config.toml at the
-    copy.
+    what this does: it has codex fetch its catalog afresh, copies that, raises the cap
+    on GPT-6.1 Sol and Terra, GPT-6 Astra, Sol and Luna and GPT-5.6 Sol, Terra and Luna
+    to the 1,050,000 their upstream API actually supports, and points config.toml at
+    the copy.
 
     Run once. Re-run after a codex upgrade, and whenever OpenAI releases a model: the
     copy is also codex's model list, so codex shows only the models it held the day
-    it was built. A later model (as GPT-6.1 Sol and Terra, GPT-6 Sol and GPT-6 Luna were) stays
-    out of every model picker until this runs again.
+    it was built. A later model (as GPT-6.1 Sol and Terra, GPT-6 Sol and GPT-6 Luna
+    were) stays out of every model picker until this runs again.
     Same behaviour as enable-1m-context.sh; this edition needs only PowerShell
     (Windows PowerShell 5.1, or PowerShell 7.2 or newer) and codex.
 
@@ -52,9 +52,8 @@ $cache   = Join-Path $codexHome "models_cache.json"
 $catalog = Join-Path $codexHome "catalog-1m.json"
 $config  = Join-Path $codexHome "config.toml"
 $targetWindow = 1050000
-# Every codex model known to take the 1.05M upstream window. They all ship capped
-# alike, so a model missing here is copied in at the stock cap and runs at 258400
-# with nothing said. The GPT-6 models are listed one by one, not by a "gpt-6"
+# Every codex model known to take the 1.05M upstream window. A model missing here
+# keeps its stock cap. The GPT-6 models are listed one by one, not by a "gpt-6"
 # prefix: a raised cap is only safe on a model known to take 1.05M upstream, so a
 # new line (a GPT-6.2, say) is added here once it is. Each entry still matches as a
 # prefix, so a variant of a listed model (gpt-6-sol-*) is raised with it. Order is
@@ -187,7 +186,7 @@ if ($Revert) {
     Set-CatalogConfig ""
     Remove-Item -LiteralPath $catalog -Force -ErrorAction SilentlyContinue
     Write-Host "reverted: model_catalog_json removed from $config (backup at $config.bak)"
-    Write-Host "codex is back to its stock catalog - 272000 cap, 258400 effective."
+    Write-Host "codex is back to its stock catalog."
     exit 0
 }
 

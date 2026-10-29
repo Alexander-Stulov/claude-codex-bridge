@@ -104,16 +104,16 @@ SERVER_INFO = {"name": "codex", "version": "0.16.3"}
 #
 # Two kinds of name. A family seat (luna-high, sol-xhigh, ...) runs its family's newest
 # model, so a caller who asks for sol gets the current Sol without knowing its version.
-# sol is GPT-6.1 Sol, terra is GPT-6.1 Terra and luna is GPT-6 Luna.
-# A pinned name is the wire slug plus the effort (gpt-5.6-sol-high) and always means
-# exactly that model: it is for a caller who
-# asked for one. When a family moves to a new model, its seat line changes here, and the
-# old model stays reachable under its pinned names.
+# sol is GPT-6.1 Sol, terra is GPT-6.1 Terra and luna is GPT-6 Luna. A pinned name is the
+# wire slug plus the effort (gpt-5.6-sol-high) and always means exactly that model: it is
+# for a caller who asked for one. When a family moves to a new model, its seat line
+# changes here, and the old model stays reachable under its pinned names.
 #
-# astra (GPT-6, wire slug gpt-6-astra, codex >= 0.153.1), sol and terra are exposed from medium
-# up through every effort the app-server advertises, ultra included. `low` is deliberately
-# absent: a scout at that depth is the wrong tool, luna is the scout. luna runs low
-# through max (codex offers it no ultra). A pinned name offers its family's rungs, no more.
+# astra (GPT-6, wire slug gpt-6-astra, codex >= 0.153.1), sol and terra are exposed
+# from medium up through every effort the app-server advertises, ultra included. `low`
+# is deliberately absent: a scout at that depth is the wrong tool, luna is the scout.
+# luna runs low through max (codex offers it no ultra). A pinned name offers its
+# family's rungs, no more.
 #
 # The effort names are codex's own, verbatim from `model/list`.supportedReasoningEfforts.
 # Two of them are not what they look like: `ultra` never reaches the wire — codex sends
@@ -129,7 +129,8 @@ _RUNGS = {"astra": ("medium", "high", "xhigh", "max", "ultra"),
 # family -> its newest model. Each family has its own model.
 _SEATS = {"astra": "gpt-6-astra", "sol": "gpt-6.1-sol", "luna": "gpt-6-luna", "terra": "gpt-6.1-terra"}
 # wire model -> the family whose rungs its pinned names offer
-_PINNED = {"gpt-6-astra": "astra", "gpt-6.1-sol": "sol", "gpt-6.1-terra": "terra", "gpt-6-sol": "sol", "gpt-6-luna": "luna",
+_PINNED = {"gpt-6-astra": "astra", "gpt-6.1-sol": "sol", "gpt-6.1-terra": "terra",
+           "gpt-6-sol": "sol", "gpt-6-luna": "luna",
            "gpt-5.6-sol": "sol", "gpt-5.6-terra": "terra", "gpt-5.6-luna": "luna"}
 MODELS = {f"{family}-{effort}": (wire, effort)
           for family, wire in _SEATS.items() for effort in _RUNGS[family]}
@@ -816,9 +817,9 @@ def pending_for(tid):
 
 
 # (wire model, effort) -> the name a thread reads back as when codex reports only the
-# pair (resume, read, fork). The first name wins: a family seat over a pinned name.
-# A thread that ran on a model the seats have since left therefore
-# reads back pinned, as the model it really ran on, and a fork of it stays there.
+# pair (resume, read, fork). The first name wins: a family seat over a pinned name. A
+# thread that ran on a model the seats have since left therefore reads back pinned, as the
+# model it really ran on, and a fork of it stays there.
 WIRE_TO_SLUG = {}
 for _slug, _pair in MODELS.items():
     WIRE_TO_SLUG.setdefault(_pair, _slug)
