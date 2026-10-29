@@ -88,9 +88,9 @@ assert "app_server_running" not in check, "bare running-boolean invites a false 
 if not _win_with_codex:
     assert check["app_server"].startswith("idle"), check["app_server"]  # lazy spawn: idle before any submit
 assert "sol-ultra" in check["models"] and "luna-medium" in check["models"], check["models"]
-# astra and sol carry codex's thinking ladder from medium through ultra, luna from low
+# astra, sol and terra carry codex's thinking ladder from medium through ultra, luna from low
 # through max — pin every rung rather than a sample.
-for _fam in ("astra", "sol"):
+for _fam in ("astra", "sol", "terra"):
     assert {f"{_fam}-{e}" for e in ("medium", "high", "xhigh", "max", "ultra")} \
         <= set(check["models"]), check["models"]
     assert f"{_fam}-low" not in check["models"], f"{_fam} starts at medium — luna is the scout"
@@ -292,21 +292,21 @@ print("smoke: thread id survives success, approval, and both failure paths")
 # --- model table round-trips ------------------------------------------------
 # WIRE_TO_SLUG is the ONLY way a thread gets a friendly slug back on the resume, read
 # and fork paths, where codex reports just the wire model and effort. Names share pairs
-# on purpose — terra-* runs luna's model, and a family's pinned names share its seats'
-# pairs — so the invariant is on pairs: every pair comes back, as a name that runs
-# exactly that pair, and as the family seat whenever one runs it.
+# on purpose — a family's pinned names share its seats' pairs — so the invariant is on
+# pairs: every pair comes back, as a name that runs exactly that pair, and as the family
+# seat whenever one runs it.
 assert set(bridge.WIRE_TO_SLUG) == set(bridge.MODELS.values()), (
     "a (wire model, effort) pair has no way back to a name: "
     f"{sorted(set(bridge.MODELS.values()) - set(bridge.WIRE_TO_SLUG))}")
 for _pair, _slug in bridge.WIRE_TO_SLUG.items():
     assert bridge.MODELS[_slug] == _pair, f"{_pair} comes back as {_slug}, which runs {bridge.MODELS[_slug]}"
 for _slug, _pair in bridge.MODELS.items():
-    if not _slug.startswith(("gpt-", "terra-")):
+    if not _slug.startswith("gpt-"):
         assert bridge.WIRE_TO_SLUG[_pair] == _slug, f"seat {_slug} comes back as {bridge.WIRE_TO_SLUG[_pair]}"
     if _slug.startswith("gpt-"):
         assert _slug == f"{_pair[0]}-{_pair[1]}", f"pinned name {_slug} does not spell its model {_pair}"
-# terra has no GPT-6 model of its own: it runs luna's, so its threads come back as luna
-assert bridge.WIRE_TO_SLUG[bridge.MODELS["terra-high"]] == "luna-high"
+# terra has its own model, so its threads come back as terra
+assert bridge.WIRE_TO_SLUG[bridge.MODELS["terra-high"]] == "terra-high"
 # Effort names are codex's, not ours: thread/start accepts any string and an invented
 # one fails at turn time instead, so a typo here is invisible until a run burns.
 _EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
@@ -317,21 +317,21 @@ print(f"smoke: {len(bridge.MODELS)} model slugs round-trip through WIRE_TO_SLUG"
 
 # --- 0.16.0: family seats follow the newest model; a pinned name never moves ---------
 # A caller who asks for a family gets its newest model without knowing the version:
-# sol is GPT-6.1 Sol, luna is GPT-6 Luna, and terra (GPT-6 has no Terra) runs GPT-6 Luna.
+# sol is GPT-6.1 Sol, luna is GPT-6 Luna, and terra is GPT-6.1 Terra.
 # A caller who names a model gets exactly that model, at every rung its family offers.
 for _e in ("low", "medium", "high", "xhigh", "max"):
     assert bridge.MODELS[f"luna-{_e}"] == ("gpt-6-luna", _e), bridge.MODELS[f"luna-{_e}"]
-for _e in ("medium", "high"):
-    assert bridge.MODELS[f"terra-{_e}"] == ("gpt-6-luna", _e), bridge.MODELS[f"terra-{_e}"]
+for _e in ("medium", "high", "xhigh", "max", "ultra"):
+    assert bridge.MODELS[f"terra-{_e}"] == ("gpt-6.1-terra", _e), bridge.MODELS[f"terra-{_e}"]
 for _e in ("medium", "high", "xhigh", "max", "ultra"):
     assert bridge.MODELS[f"sol-{_e}"] == ("gpt-6.1-sol", _e), bridge.MODELS[f"sol-{_e}"]
 for _e in ("medium", "high", "xhigh", "max", "ultra"):
     assert bridge.MODELS[f"astra-{_e}"] == ("gpt-6-astra", _e), bridge.MODELS[f"astra-{_e}"]
 _FULL = ("medium", "high", "xhigh", "max", "ultra")
 _LUNA = ("low", "medium", "high", "xhigh", "max")
-_PINNED = {"gpt-6-astra": _FULL, "gpt-6.1-sol": _FULL, "gpt-6-sol": _FULL,
+_PINNED = {"gpt-6-astra": _FULL, "gpt-6.1-sol": _FULL, "gpt-6.1-terra": _FULL, "gpt-6-sol": _FULL,
            "gpt-6-luna": _LUNA, "gpt-5.6-sol": _FULL,
-           "gpt-5.6-terra": ("medium", "high"), "gpt-5.6-luna": _LUNA}
+           "gpt-5.6-terra": _FULL, "gpt-5.6-luna": _LUNA}
 _pinned_names = {s for s in bridge.MODELS if s.startswith("gpt-")}
 assert _pinned_names == {f"{w}-{e}" for w, es in _PINNED.items() for e in es}, sorted(_pinned_names ^ {
     f"{w}-{e}" for w, es in _PINNED.items() for e in es})
@@ -344,7 +344,7 @@ _model_prop = next(t for t in bridge.TOOLS if t["name"] == "codex_submit")["inpu
 assert _model_prop["enum"] == sorted(bridge.MODELS), _model_prop["enum"]
 for _where, _text in (("model description", _model_prop["description"]),
                       ("instructions", bridge.INSTRUCTIONS.split("MODELS by task weight")[1].split("\n")[0])):
-    for _phrase in ("GPT-6.1 Sol", "GPT-6 Luna", "gpt-5.6-sol-high", "only when"):
+    for _phrase in ("GPT-6.1 Sol", "GPT-6.1 Terra", "GPT-6 Luna", "gpt-5.6-sol-high", "only when"):
         assert _phrase in _text, f"{_where} lost {_phrase!r}"
 
 # ... and that is the model the turn actually runs: the wire slug rides turn/start.
@@ -366,6 +366,7 @@ try:
     assert _sent_models == list(bridge.MODELS.values()), _sent_models
     assert _sent_models[:3] == [("gpt-6-astra", "medium"), ("gpt-6-astra", "high"), ("gpt-6-astra", "xhigh")]
     assert ("gpt-6.1-sol", "xhigh") in _sent_models and ("gpt-6-luna", "medium") in _sent_models
+    assert ("gpt-6.1-terra", "high") in _sent_models, _sent_models
 
     # A steer carries input only, so it cannot change the running turn's model. A name for
     # the same model steers; a different model is refused, never silently dropped — the
@@ -378,17 +379,17 @@ try:
     _live = bridge._new_thread_state("t36", "/tmp", "write", "luna-medium")
     _live.update(state="running", turn_id="u36", gen=bridge.APP.gen)
     bridge.APP.threads["t36"] = _live
-    for _same in ("luna-medium", "terra-medium", "gpt-6-luna-medium"):
+    for _same in ("luna-medium", "gpt-6-luna-medium"):
         assert bridge.codex_submit({"prompt": "also this", "model": _same, "thread": "t36"})["steered"] is True
-    assert _steers == ["turn/steer"] * 3, _steers
-    for _other in ("gpt-5.6-luna-medium", "luna-high", "sol-high"):
+    assert _steers == ["turn/steer"] * 2, _steers
+    for _other in ("terra-medium", "gpt-5.6-luna-medium", "luna-high", "sol-high"):
         try:
             bridge.codex_submit({"prompt": "also this", "model": _other, "thread": "t36"})
             raise AssertionError(f"a steer naming {_other} on a luna-medium turn must be refused")
         except ValueError as e:
             assert "mid-turn" in str(e) and "luna-medium" in str(e) and _other in str(e) \
                 and "codex_interrupt" in str(e), e
-    assert _steers == ["turn/steer"] * 3, "a refused steer must send nothing"
+    assert _steers == ["turn/steer"] * 2, "a refused steer must send nothing"
 
     # Resuming a thread reads its model off codex's record, whatever name the caller passes:
     # until the new turn really starts, the thread's last work ran on what codex says.

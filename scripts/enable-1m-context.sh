@@ -6,19 +6,19 @@
 #     model_context_window = 1050000      ->  min(1050000, max_context_window)
 #
 # and the shipped catalog caps every one of these models below that, so the
-# override cannot reach 1,050,000. Out of the box they all run at a 272000 window
-# (258400 after codex's 95% headroom) — gpt-6-astra included, despite being the
-# flagship. The cap itself lives in the model catalog, and the only supported way
+# override cannot reach 1,050,000. GPT-6.1 Sol and Terra ship at a 500000 window;
+# the older models ship at 272000 (258400 after codex's 95% headroom), gpt-6-astra
+# included. The cap itself lives in the model catalog, and the only supported way
 # to change it is to hand codex a whole catalog via `model_catalog_json`. That is
-# what this does: it has codex fetch its catalog afresh, copies that, raises the
-# cap on GPT-6.1 Sol, GPT-6 Astra, Sol and Luna and GPT-5.6 Sol, Terra and Luna to
-# the 1,050,000 their upstream API actually supports, and points config.toml at the
-# copy.
+# what this does: it has codex fetch its catalog afresh, copies that, raises the cap
+# on GPT-6.1 Sol and Terra, GPT-6 Astra, Sol and Luna and GPT-5.6 Sol, Terra and Luna
+# to the 1,050,000 their upstream API actually supports, and points config.toml at
+# the copy.
 #
 # Run once. Re-run after a codex upgrade, and whenever OpenAI releases a model: the
 # copy is also codex's model list, so codex shows only the models it held the day
-# it was built. A later model (as GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna were) stays
-# out of every model picker until this runs again.
+# it was built. A later model (as GPT-6.1 Sol and Terra, GPT-6 Sol and GPT-6 Luna
+# were) stays out of every model picker until this runs again.
 #
 #   ./scripts/enable-1m-context.sh              raise the cap
 #   ./scripts/enable-1m-context.sh --revert     undo (restores the stock catalog)
@@ -90,7 +90,7 @@ if [ "$REVERT" -eq 1 ]; then
   set_config -
   rm -f "$CATALOG"
   echo "reverted: model_catalog_json removed from $CONFIG (backup at $CONFIG.bak)"
-  echo "codex is back to its stock catalog — 272000 cap, 258400 effective."
+  echo "codex is back to its stock catalog."
   exit 0
 fi
 
@@ -129,14 +129,13 @@ fi
 python3 - "$CACHE" "$CATALOG" "$TARGET_WINDOW" "$VERIFY_PICK" <<'PY'
 import datetime, json, sys
 cache, out_path, target, pick_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
-# Every codex model known to take the 1.05M upstream window. They all ship capped
-# alike, so a model missing here is copied in at the stock cap and runs at 258400
-# with nothing said. The GPT-6 models are listed one by one, not by a "gpt-6"
+# Every codex model known to take the 1.05M upstream window. A model missing here
+# keeps its stock cap. The GPT-6 models are listed one by one, not by a "gpt-6"
 # prefix: a raised cap is only safe on a model known to take 1.05M upstream, so a
 # new line (a GPT-6.2, say) is added here once it is. Each entry still matches as a
 # prefix, so a variant of a listed model (gpt-6-sol-*) is raised with it. Order is
 # the live check's preference.
-RAISE = ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-")
+RAISE = ("gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-")
 data = json.load(open(cache))
 models = data.get("models") or []
 if not models:
