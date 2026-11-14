@@ -145,7 +145,13 @@ has codex fetch its catalog afresh, copies that, raises both the window and its
 ceiling on each of those models, and points `config.toml` at the copy
 via `model_catalog_json`. It then verifies with a one-word codex run — on the raised
 model you are most likely to use — that the effective window really moved to
-**997,500**, and refuses to claim success otherwise.
+**902,500**, and refuses to claim success otherwise.
+
+It raises the window to **950,000**, not the full 1,050,000: upstream rejects a
+request at about 920,000 input tokens (the rest is reserved for output), while codex
+compacts only at 90% of the window. At 1,050,000 that is 945,000 — past the point
+OpenAI refuses — so long threads failed with *"Codex ran out of room in the model's
+context window"* instead of compacting. At 950,000 codex compacts at 855,000.
 
 Run it once, then restart Claude Desktop — the catalog is read at app-server startup.
 The copy is also codex's model list: while `model_catalog_json` is set, codex stops
@@ -161,9 +167,9 @@ does not list yet — a GPT-6.2, say — is shown at the stock cap until the scr
 
 This step is **optional**, and it has a trade-off worth knowing about: it will
 consume your OpenAI usage quota faster. Raising the cap removes the ceiling that
-was keeping threads small — codex now lets a thread grow to ~945,000 tokens before
+was keeping threads small — codex now lets a thread grow to ~855,000 tokens before
 it compacts, and every turn re-sends the whole conversation as input. A long thread
-that used to compact down at 244,800 tokens now keeps sending a context up to ~4x
+that used to compact down at 244,800 tokens now keeps sending a context up to ~3.5x
 larger on each subsequent turn, so the same work draws down your ChatGPT plan
 limits (or API spend) noticeably faster. That is entirely between you and OpenAI —
 this bridge charges nothing and sits in the middle. Raise the cap when you actually
@@ -272,7 +278,7 @@ after one, early turns exist only as a summary, so restate anything exact.
 
 The threshold is **derived**, not reported: the wire carries only the effective
 window (raw × 95%) while codex compacts at raw × 90%. Exact for both real windows
-(258,400 → 244,800 and 997,500 → 945,000) and asserted in `tests/smoke.py`, which is
+(258,400 → 244,800 and 902,500 → 855,000) and asserted in `tests/smoke.py`, which is
 the thing that will notice if a codex upgrade moves either percentage. It is an upper
 bound — a `model_auto_compact_token_limit` in your `config.toml` is invisible on the
 wire and would compact sooner. Erring high is deliberate: an early compaction costs

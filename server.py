@@ -97,7 +97,7 @@ APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, 
 
 RESULTS: completed carries output (text, or your schema's JSON) plus bridge-stamped provenance - trust that over anything the model says about itself. Errors come back verbatim, including schema rejections."""
 
-SERVER_INFO = {"name": "codex", "version": "0.16.3"}
+SERVER_INFO = {"name": "codex", "version": "0.16.4"}
 
 # Friendly slug -> (wire model, reasoning effort). One caller-facing knob; the
 # app-server takes them as separate per-turn fields.
@@ -324,7 +324,7 @@ def sandbox_policy(mode):
 # wire is the effective window (raw x 95%, the headroom it reserves for prompts and
 # output). So the threshold is derived: raw = window * 100/95, compact at raw * 9/10,
 # i.e. window * 90/95. Exact for both real windows — 258400 -> 244800 and
-# 997500 -> 945000 — and matching codex's own unit test (400000 raw -> 360000).
+# 902500 -> 855000 — and matching codex's own unit test (400000 raw -> 360000).
 # If codex ever changes either percentage this silently drifts; the fixture-backed
 # conformance test will not catch it, so re-check these two constants after an upgrade.
 EFFECTIVE_WINDOW_PCT, AUTO_COMPACT_PCT = 95, 90
