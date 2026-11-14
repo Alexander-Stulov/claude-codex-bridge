@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SH = os.path.join(HERE, "..", "scripts", "enable-1m-context.sh")
 PS1 = os.path.join(HERE, "..", "scripts", "enable-1m-context.ps1")
 WIN = sys.platform == "win32"
-TARGET = 1050000
+TARGET = 950000
 
 # --- fixtures: the shape codex writes, trimmed to what the script reads or rewrites ----
 def model(slug, ctx=272000, cap=872000, vis="list"):
@@ -186,7 +186,7 @@ def scenario_installed_override_sees_new_model(kind, cmd):
         assert by[s] == stock[s], "only the RAISE models move: %r" % by[s]
     assert "8 raised" in r.stdout and "gpt-6-astra" in r.stdout, transcript(r)
     assert "on gpt-6-astra" in r.stdout, "the live check must run on the flagship once it is raised" + transcript(r)
-    assert "OK" in r.stdout and "997500" in r.stdout, transcript(r)
+    assert "OK" in r.stdout and "902500" in r.stdout, transcript(r)
     assert not warnings(r), warnings(r)
     check_config(home, kind)
 
@@ -233,7 +233,7 @@ def scenario_old_cli_falls_back_to_cache(kind, cmd):
     check_config(home, kind)
 
 
-# --- F: the catalog from before GPT-6 Sol: the new models appear, and at 1.05M ----------
+# --- F: the catalog from before GPT-6 Sol: the new models appear, and at 950K  ----------
 # The report this covers: an override built on 2026-09-06 (astra and the GPT-5.6 seats
 # raised) kept GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna out of codex's model list, and a
 # script that only knew astra and GPT-5.6 copied them in at the stock 272000 cap.

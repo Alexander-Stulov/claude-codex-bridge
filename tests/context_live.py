@@ -18,7 +18,7 @@ import json, os, subprocess, sys, tempfile, threading, time
 SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server.py")
 repo = tempfile.mkdtemp(prefix="ctx-")
 subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
-STOCK, RAISED = 258_400, 997_500
+STOCK, RAISED = 258_400, 902_500
 
 
 class Bridge:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Raise the codex context window for the GPT-6 and GPT-5.6 models to 1.05M.
+# Raise the codex context window for the GPT-6 and GPT-5.6 models to 950K.
 #
 # Why a script and not a config line: codex clamps the documented override.
 #
@@ -12,8 +12,13 @@
 # to change it is to hand codex a whole catalog via `model_catalog_json`. That is
 # what this does: it has codex fetch its catalog afresh, copies that, raises the cap
 # on GPT-6.1 Sol and Terra, GPT-6 Astra, Sol and Luna and GPT-5.6 Sol, Terra and Luna
-# to the 1,050,000 their upstream API actually supports, and points config.toml at
-# the copy.
+# to 950,000, and points config.toml at the copy.
+#
+# Why 950,000 and not the 1,050,000 the models advertise: upstream rejects a request
+# at about 920,000 input tokens (the 1.05M includes room reserved for output), while
+# codex only compacts at 90% of the window. At 1,050,000 that is 945,000, past the
+# point OpenAI refuses, so a long thread failed with "ran out of room in the model's
+# context window" instead of compacting. At 950,000 codex compacts at 855,000.
 #
 # Run once. Re-run after a codex upgrade, and whenever OpenAI releases a model: the
 # copy is also codex's model list, so codex shows only the models it held the day
@@ -31,7 +36,7 @@ CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 CACHE="$CODEX_HOME/models_cache.json"
 CATALOG="$CODEX_HOME/catalog-1m.json"
 CONFIG="$CODEX_HOME/config.toml"
-TARGET_WINDOW=1050000
+TARGET_WINDOW=950000
 REVERT=0
 VERIFY=1
 VERIFY_PICK="$(mktemp)"                # which raised model the live check should use
@@ -129,7 +134,7 @@ fi
 python3 - "$CACHE" "$CATALOG" "$TARGET_WINDOW" "$VERIFY_PICK" <<'PY'
 import datetime, json, sys
 cache, out_path, target, pick_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
-# Every codex model known to take the 1.05M upstream window. A model missing here
+# Every codex model known to take the 1.05M upstream window (raised to TARGET_WINDOW). A model missing here
 # keeps its stock cap. The GPT-6 models are listed one by one, not by a "gpt-6"
 # prefix: a raised cap is only safe on a model known to take 1.05M upstream, so a
 # new line (a GPT-6.2, say) is added here once it is. Each entry still matches as a

@@ -413,16 +413,16 @@ print("smoke: family seats run the newest GPT-6 models; pinned names run exactly
 # codex compacts at raw x 90%. Both real windows must come out exact, and codex's
 # own unit test (400000 raw -> 360000) has to hold too. If a codex upgrade changes
 # either percentage these numbers move and this is the only thing that will say so.
-assert bridge.compaction_runway(997_500, 0)["tokens_before_compaction"] == 945_000
+assert bridge.compaction_runway(902_500, 0)["tokens_before_compaction"] == 855_000
 assert bridge.compaction_runway(258_400, 0)["tokens_before_compaction"] == 244_800
 assert bridge.compaction_runway(400_000 * 95 // 100, 0)["tokens_before_compaction"] == 360_000
 # used is subtracted, and a thread past the threshold reports 0 rather than negative
-assert bridge.compaction_runway(997_500, 45_000)["tokens_before_compaction"] == 900_000
+assert bridge.compaction_runway(902_500, 45_000)["tokens_before_compaction"] == 810_000
 assert bridge.compaction_runway(258_400, 999_999)["tokens_before_compaction"] == 0
 assert bridge.compaction_runway(258_400, 10_000)["tokens_used"] == 10_000
 # unknown inputs must yield no claim at all, never a guess
 assert bridge.compaction_runway(None, 10) is None
-assert bridge.compaction_runway(997_500, None) is None
+assert bridge.compaction_runway(902_500, None) is None
 print("smoke: compaction runway derives exactly for both real windows; unknowns stay unknown")
 
 # --- workspace refusal is platform-aware; scratch root uses native separators ---------
