@@ -8,12 +8,14 @@
         model_context_window = 1050000      ->  min(1050000, max_context_window)
 
     and the shipped catalog caps every one of these models below that, so the
-    override cannot reach 1,050,000. GPT-6.1 Sol and Terra ship at a 500000 window;
-    the older models ship at 272000 (258400 after codex's 95% headroom), gpt-6-astra
-    included. The cap itself lives in the model catalog, and the only supported way
+    override cannot reach 1,050,000. GPT-6.2 Sol and GPT-6.1 Sol and Terra ship at a
+    500000 window; GPT-6.2 Astra and the older models ship at 272000 (258400 after
+    codex's 95% headroom). Both GPT-6.2 models have a max_context_window of 872000.
+    The cap itself lives in the model catalog, and the only supported way
     to change it is to hand codex a whole catalog via `model_catalog_json`. That is
     what this does: it has codex fetch its catalog afresh, copies that, raises the cap
-    on GPT-6.1 Sol and Terra, GPT-6 Astra, Sol and Luna and GPT-5.6 Sol, Terra and Luna
+    on GPT-6.2 Astra and Sol, GPT-6.1 Sol and Terra, GPT-6 Astra, Sol and Luna,
+    and GPT-5.6 Sol, Terra and Luna
     to 950,000, and points config.toml at the copy.
 
     Why 950,000 and not the 1,050,000 the models advertise: upstream rejects a request
@@ -24,8 +26,8 @@
 
     Run once. Re-run after a codex upgrade, and whenever OpenAI releases a model: the
     copy is also codex's model list, so codex shows only the models it held the day
-    it was built. A later model (as GPT-6.1 Sol and Terra, GPT-6 Sol and GPT-6 Luna
-    were) stays out of every model picker until this runs again.
+    it was built. A later model (including GPT-6.2 Astra and Sol, released 2026-11-17)
+    stays out of every model picker until this runs again.
     Same behaviour as enable-1m-context.sh; this edition needs only PowerShell
     (Windows PowerShell 5.1, or PowerShell 7.2 or newer) and codex.
 
@@ -60,10 +62,10 @@ $targetWindow = 950000
 # Every codex model known to take the 1.05M upstream window (raised to $targetWindow). A model missing here
 # keeps its stock cap. The GPT-6 models are listed one by one, not by a "gpt-6"
 # prefix: a raised cap is only safe on a model known to take 1.05M upstream, so a
-# new line (a GPT-6.2, say) is added here once it is. Each entry still matches as a
+# new line is added here once it is. Each entry still matches as a
 # prefix, so a variant of a listed model (gpt-6-sol-*) is raised with it. Order is
 # the live check's preference.
-$raise = @("gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-")
+$raise = @("gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-")
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)   # a BOM would break codex's parsers
 $script:liftedConfig = $null     # config.toml's bytes while the override is lifted, until it is re-set
 

@@ -34,11 +34,15 @@ def model(slug, ctx=272000, cap=872000, vis="list"):
             "input_modalities": ["text"]}
 
 GPT56 = [model("gpt-5.6-sol"), model("gpt-5.6-terra"), model("gpt-5.6-luna")]
-GPT6 = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"]  # codex 0.165.0's order
-OTHERS = [model("gpt-5.5", cap=272000), model("codex-auto-review", vis="hide")]
+GPT6 = ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra",
+        "gpt-6-sol", "gpt-6-luna"]  # codex 0.170.0's order, with gpt-reserve after terra
+OTHERS = [model("codex-auto-review", vis="hide")]
 STALE = GPT56 + OTHERS                                         # the cache from before astra
 SEP6 = [model("gpt-6-astra"), model("gpt-reserve", vis="hide")] + GPT56 + OTHERS   # astra, no 6-sol/luna/6.1
-FRESH = [model(s) for s in GPT6] + [model("gpt-reserve", vis="hide")] + GPT56 + OTHERS
+FRESH = [model("gpt-6.2-sol", ctx=500000), model("gpt-6.2-astra"),
+         model("gpt-6.1-terra", ctx=500000), model("gpt-reserve", vis="hide"),
+         model("gpt-6.1-sol", ctx=500000), model("gpt-6-astra"), model("gpt-6-sol"),
+         model("gpt-6-luna")] + GPT56 + OTHERS
 BUNDLED = FRESH + [model("gpt-daybreak-blue-latest")]         # what a logged-out CLI prints
 OLD_RAISE = ("gpt-6-astra", "gpt-5.6-")                        # what the script raised before GPT-6 Sol
 
@@ -182,29 +186,33 @@ def scenario_installed_override_sees_new_model(kind, cmd):
     for s in GPT6 + ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]:
         assert (by[s]["context_window"], by[s]["max_context_window"]) == (TARGET, TARGET), by[s]
     stock = {m["slug"]: m for m in FRESH}
-    for s in ("gpt-5.5", "codex-auto-review", "gpt-reserve"):
+    for s in ("codex-auto-review", "gpt-reserve"):
         assert by[s] == stock[s], "only the RAISE models move: %r" % by[s]
-    assert "8 raised" in r.stdout and "gpt-6-astra" in r.stdout, transcript(r)
-    assert "on gpt-6-astra" in r.stdout, "the live check must run on the flagship once it is raised" + transcript(r)
+    assert "10 raised" in r.stdout and "gpt-6.2-astra" in r.stdout, transcript(r)
+    assert "on gpt-6.2-astra" in r.stdout, "the live check must run on the flagship once it is raised" + transcript(r)
     assert "OK" in r.stdout and "902500" in r.stdout, transcript(r)
     assert not warnings(r), warnings(r)
     check_config(home, kind)
 
 
-# --- B: the account's catalog has no astra: say so, raise the rest ----------------------
+# --- B: missing new models are called out; verification follows RAISE order ------------
 def scenario_missing_family_is_called_out(kind, cmd):
-    home = write_home(cache=STALE, override=True, remote=[m for m in FRESH if m["slug"] != "gpt-6-astra"])
-    r = run(cmd, home)
-    assert r.returncode == 0, kind + transcript(r)
-    by = catalog_of(home)
-    assert "gpt-6-astra" not in by and by["gpt-5.6-sol"]["context_window"] == TARGET, by.keys()
-    assert "7 raised" in r.stdout and "on gpt-6.1-sol" in r.stdout, (
-        "%s: without astra the live check moves to the next raised model in RAISE order" % kind + transcript(r))
-    w = warnings(r)
-    assert any("gpt-6-astra" in l for l in w), (
-        "%s: a RAISE family that matched nothing must be called out, not silently skipped" % kind + transcript(r))
-    assert len(w) == 1, "%s: only the missing model is called out: %r" % (kind, w)
-    check_config(home, kind)
+    for missing, preferred, raised in (
+            (("gpt-6.2-astra",), "gpt-6.2-sol", "9 raised"),
+            (("gpt-6.2-astra", "gpt-6.2-sol"), "gpt-6-astra", "8 raised")):
+        home = write_home(cache=STALE, override=True, remote=[m for m in FRESH if m["slug"] not in missing])
+        r = run(cmd, home)
+        assert r.returncode == 0, kind + transcript(r)
+        by = catalog_of(home)
+        assert not set(missing) & by.keys() and by["gpt-5.6-sol"]["context_window"] == TARGET, by.keys()
+        assert raised in r.stdout and "on " + preferred in r.stdout, (
+            "%s: the live check must follow RAISE order when %r are missing" % (kind, missing) + transcript(r))
+        w = warnings(r)
+        for s in missing:
+            assert any(s + "*" in line for line in w), (
+                "%s: a missing RAISE model must be called out: %s" % (kind, s) + transcript(r))
+        assert len(w) == len(missing), "%s: only missing models are called out: %r" % (kind, w)
+        check_config(home, kind)
 
 
 # --- C: first run, nothing cached yet: the script fetches the catalog itself ------------
@@ -237,7 +245,7 @@ def scenario_old_cli_falls_back_to_cache(kind, cmd):
 # The report this covers: an override built on 2026-09-06 (astra and the GPT-5.6 seats
 # raised) kept GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna out of codex's model list, and a
 # script that only knew astra and GPT-5.6 copied them in at the stock 272000 cap.
-# The same check now holds GPT-6.1 Terra, which such a catalog also hides.
+# The same check now holds GPT-6.1 Terra and GPT-6.2 Astra/Sol, which such a catalog also hides.
 def scenario_new_gpt6_models_listed_and_raised(kind, cmd):
     home = write_home(cache=SEP6, override=True, remote=FRESH, prior=SEP6)
     before = catalog_of(home)
@@ -245,16 +253,31 @@ def scenario_new_gpt6_models_listed_and_raised(kind, cmd):
     r = run(cmd, home)
     assert r.returncode == 0, kind + transcript(r)
     by = catalog_of(home)
-    for s in ("gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"):
+    for s in ("gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"):
         assert s in by, "%s: %s missing from the rebuilt catalog, so codex never lists it" % (kind, s) + transcript(r)
         assert (by[s]["context_window"], by[s]["max_context_window"]) == (TARGET, TARGET), (
             "%s: %s listed but left at the stock cap: %r" % (kind, s, by[s]) + transcript(r))
         assert s in r.stdout, "%s: %s must be in the raised list the script prints" % (kind, s) + transcript(r)
     assert [m["slug"] for m in json.load(open(os.path.join(home, "catalog-1m.json")))["models"]] == \
         [m["slug"] for m in FRESH], "the catalog keeps codex's model order (its picker follows it)"
-    assert "8 raised" in r.stdout and "on gpt-6-astra" in r.stdout, transcript(r)
+    assert "10 raised" in r.stdout and "on gpt-6.2-astra" in r.stdout, transcript(r)
     assert not warnings(r), warnings(r)
     check_config(home, kind)
+
+
+def scenario_model_prefixes_are_specific(kind, cmd):
+    variants = [model("gpt-6.2-astra-preview"), model("gpt-6.2-sol-preview")]
+    untouched = [model("gpt-6.2-luna"), model("gpt-6.3-astra"), model("gpt-6.3-sol")]
+    home = write_home(cache=None, override=False, remote=FRESH + variants + untouched)
+    r = run(cmd, home)
+    assert r.returncode == 0, kind + transcript(r)
+    by = catalog_of(home)
+    for s in ("gpt-6.2-astra-preview", "gpt-6.2-sol-preview"):
+        assert (by[s]["context_window"], by[s]["max_context_window"]) == (950000, 950000), by[s]
+    for stock in untouched:
+        assert by[stock["slug"]] == stock, "an unlisted GPT-6 model must keep its stock cap: %r" % by[stock["slug"]]
+    assert "12 raised" in r.stdout and "on gpt-6.2-astra" in r.stdout, transcript(r)
+    assert not warnings(r), warnings(r)
 
 
 # --- E: no cache and no fetch (logged out): fail, and put the override back --------------
@@ -275,6 +298,7 @@ SCENARIOS = [
     ("old cli falls back to the cache", scenario_old_cli_falls_back_to_cache),
     ("failure restores config", scenario_failure_restores_config),
     ("new GPT-6 models listed and raised", scenario_new_gpt6_models_listed_and_raised),
+    ("model prefixes are specific", scenario_model_prefixes_are_specific),
 ]
 
 
