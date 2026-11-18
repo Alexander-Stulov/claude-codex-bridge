@@ -97,7 +97,9 @@ for _fam in ("astra", "sol", "terra"):
 assert {f"luna-{e}" for e in ("low", "medium", "high", "xhigh", "max")} <= set(check["models"]), check["models"]
 assert "luna-ultra" not in check["models"], "codex offers luna no ultra"
 assert "gpt-6-astra-low" not in check["models"], "a pinned name offers its family's rungs, no more"
-assert {"gpt-5.6-sol-high", "gpt-6.1-sol-xhigh"} <= set(check["models"]), check["models"]
+assert "gpt-6.2-astra-low" not in check["models"] and "gpt-6.2-sol-low" not in check["models"]
+assert {"gpt-5.6-sol-high", "gpt-6.1-sol-xhigh", "gpt-6.2-astra-ultra", "gpt-6.2-sol-medium"} \
+    <= set(check["models"]), check["models"]
 
 assert "error" in out[5], "unknown tool must return an error"
 
@@ -317,34 +319,39 @@ print(f"smoke: {len(bridge.MODELS)} model slugs round-trip through WIRE_TO_SLUG"
 
 # --- 0.16.0: family seats follow the newest model; a pinned name never moves ---------
 # A caller who asks for a family gets its newest model without knowing the version:
-# sol is GPT-6.1 Sol, luna is GPT-6 Luna, and terra is GPT-6.1 Terra.
+# astra and sol are GPT-6.2, luna is GPT-6 Luna, and terra is GPT-6.1 Terra.
 # A caller who names a model gets exactly that model, at every rung its family offers.
 for _e in ("low", "medium", "high", "xhigh", "max"):
     assert bridge.MODELS[f"luna-{_e}"] == ("gpt-6-luna", _e), bridge.MODELS[f"luna-{_e}"]
 for _e in ("medium", "high", "xhigh", "max", "ultra"):
     assert bridge.MODELS[f"terra-{_e}"] == ("gpt-6.1-terra", _e), bridge.MODELS[f"terra-{_e}"]
 for _e in ("medium", "high", "xhigh", "max", "ultra"):
-    assert bridge.MODELS[f"sol-{_e}"] == ("gpt-6.1-sol", _e), bridge.MODELS[f"sol-{_e}"]
+    assert bridge.MODELS[f"sol-{_e}"] == ("gpt-6.2-sol", _e), bridge.MODELS[f"sol-{_e}"]
 for _e in ("medium", "high", "xhigh", "max", "ultra"):
-    assert bridge.MODELS[f"astra-{_e}"] == ("gpt-6-astra", _e), bridge.MODELS[f"astra-{_e}"]
+    assert bridge.MODELS[f"astra-{_e}"] == ("gpt-6.2-astra", _e), bridge.MODELS[f"astra-{_e}"]
 _FULL = ("medium", "high", "xhigh", "max", "ultra")
 _LUNA = ("low", "medium", "high", "xhigh", "max")
-_PINNED = {"gpt-6-astra": _FULL, "gpt-6.1-sol": _FULL, "gpt-6.1-terra": _FULL, "gpt-6-sol": _FULL,
+_PINNED = {"gpt-6.2-astra": _FULL, "gpt-6.2-sol": _FULL,
+           "gpt-6-astra": _FULL, "gpt-6.1-sol": _FULL, "gpt-6.1-terra": _FULL, "gpt-6-sol": _FULL,
            "gpt-6-luna": _LUNA, "gpt-5.6-sol": _FULL,
            "gpt-5.6-terra": _FULL, "gpt-5.6-luna": _LUNA}
 _pinned_names = {s for s in bridge.MODELS if s.startswith("gpt-")}
 assert _pinned_names == {f"{w}-{e}" for w, es in _PINNED.items() for e in es}, sorted(_pinned_names ^ {
     f"{w}-{e}" for w, es in _PINNED.items() for e in es})
+for _wire, _efforts in _PINNED.items():
+    for _e in _efforts:
+        assert bridge.MODELS[f"{_wire}-{_e}"] == (_wire, _e), (_wire, _e)
 # a thread that ran on a model the seats have since left comes back pinned, so a fork or
 # a read reports — and keeps — the model it really ran on
-for _old in (("gpt-6-sol", "high"), ("gpt-5.6-sol", "high"), ("gpt-5.6-terra", "high"), ("gpt-5.6-luna", "medium")):
+for _old in (("gpt-6-astra", "high"), ("gpt-6.1-sol", "high"), ("gpt-6-sol", "high"),
+             ("gpt-5.6-sol", "high"), ("gpt-5.6-terra", "high"), ("gpt-5.6-luna", "medium")):
     assert bridge.WIRE_TO_SLUG[_old] == f"{_old[0]}-{_old[1]}", (_old, bridge.WIRE_TO_SLUG[_old])
 # the tool schema offers every name, and the guidance tells callers which kind to use
 _model_prop = next(t for t in bridge.TOOLS if t["name"] == "codex_submit")["inputSchema"]["properties"]["model"]
 assert _model_prop["enum"] == sorted(bridge.MODELS), _model_prop["enum"]
 for _where, _text in (("model description", _model_prop["description"]),
                       ("instructions", bridge.INSTRUCTIONS.split("MODELS by task weight")[1].split("\n")[0])):
-    for _phrase in ("GPT-6.1 Sol", "GPT-6.1 Terra", "GPT-6 Luna", "gpt-5.6-sol-high", "only when"):
+    for _phrase in ("GPT-6.2 Astra", "GPT-6.2 Sol", "GPT-6.1 Terra", "GPT-6 Luna", "gpt-5.6-sol-high", "only when"):
         assert _phrase in _text, f"{_where} lost {_phrase!r}"
 
 # ... and that is the model the turn actually runs: the wire slug rides turn/start.
@@ -360,12 +367,13 @@ bridge.APP.request = _fake_model_request
 try:
     for _slug in bridge.MODELS:                   # every name, seats and pinned alike
         bridge.APP.threads.clear()
-        _r = bridge.codex_submit({"prompt": "go", "model": _slug, "mode": "read"})
+        _r = bridge.codex_submit({"prompt": "go", "model": _slug, "mode": "read",
+                                  "cwd": os.path.dirname(os.path.abspath(server))})
         assert _r["model"] == _slug, _r
         assert bridge._provenance(bridge.APP.threads["t35"])["model"] == bridge.MODELS[_slug][0]
     assert _sent_models == list(bridge.MODELS.values()), _sent_models
-    assert _sent_models[:3] == [("gpt-6-astra", "medium"), ("gpt-6-astra", "high"), ("gpt-6-astra", "xhigh")]
-    assert ("gpt-6.1-sol", "xhigh") in _sent_models and ("gpt-6-luna", "medium") in _sent_models
+    assert _sent_models[:3] == [("gpt-6.2-astra", "medium"), ("gpt-6.2-astra", "high"), ("gpt-6.2-astra", "xhigh")]
+    assert ("gpt-6.2-sol", "xhigh") in _sent_models and ("gpt-6-luna", "medium") in _sent_models
     assert ("gpt-6.1-terra", "high") in _sent_models, _sent_models
 
     # A steer carries input only, so it cannot change the running turn's model. A name for
@@ -395,13 +403,18 @@ try:
     # until the new turn really starts, the thread's last work ran on what codex says.
     def _fake_resume(method, params, timeout=120):
         return {"thread/resume": {"thread": {"id": "t37", "cwd": "/tmp", "turns": []}, "cwd": "/tmp",
-                                  "model": "gpt-5.6-terra", "reasoningEffort": "high"},
+                                  "model": _resume_wire, "reasoningEffort": "high"},
                 "config/read": {"config": {"windows": {"sandbox": "unelevated"}}, "layers": []}}[method]
     bridge.APP.request = _fake_resume
-    bridge.APP.threads.clear()
-    _st = bridge.attach_thread("t37", mode="write", model_slug="terra-high")
-    assert _st["model"] == "gpt-5.6-terra-high", _st["model"]
-    assert bridge._provenance(_st)["model"] == "gpt-5.6-terra", bridge._provenance(_st)
+    for _resume_wire, _expected_slug in (("gpt-5.6-terra", "gpt-5.6-terra-high"),
+                                         ("gpt-6-astra", "gpt-6-astra-high"),
+                                         ("gpt-6.1-sol", "gpt-6.1-sol-high"),
+                                         ("gpt-6.2-astra", "astra-high"),
+                                         ("gpt-6.2-sol", "sol-high")):
+        bridge.APP.threads.clear()
+        _st = bridge.attach_thread("t37", mode="write", model_slug="terra-high")
+        assert _st["model"] == _expected_slug, (_resume_wire, _st["model"])
+        assert bridge._provenance(_st)["model"] == _resume_wire, bridge._provenance(_st)
 finally:
     bridge.APP.ensure, bridge.APP.request = _real_ensure, _real_request
     bridge.APP.threads.clear(); bridge.APP.requests.clear()
@@ -927,6 +940,15 @@ try:
     assert _p["provenance"]["model"] == "gpt-5.6-terra", _p["provenance"]
     assert _p["provenance"]["mode"] is None and _p["provenance"]["cwd"] == "/tmp", _p["provenance"]
     assert "t50" not in bridge.APP.threads, "a read must not cache the thread"
+
+    for _wire, _expected_slug in (("gpt-6-astra", "gpt-6-astra-high"),
+                                  ("gpt-6.1-sol", "gpt-6.1-sol-high"),
+                                  ("gpt-6.2-astra", "astra-high"),
+                                  ("gpt-6.2-sol", "sol-high")):
+        bridge.APP.request = _record([_turn("completed", "done")], model=_wire)  # type: ignore[method-assign]  # Replace codex I/O with the recorded thread.
+        _p = bridge.codex_poll({"thread": "t50"})
+        assert _p["provenance"]["model_slug"] == _expected_slug, _p
+        assert _p["provenance"]["model"] == _wire, _p
 
     bridge.APP.request = _record([_turn("failed", error={"message": "boom"})])
     _p = bridge.codex_poll({"thread": "t50"})

@@ -42,7 +42,7 @@ codex login                      # opens a browser; sign in with ChatGPT or an A
 Verify before installing the bridge:
 
 ```bash
-codex --version                  # 0.159.0 or newer, for the GPT-6 Sol and Luna seats
+codex --version                  # 0.170.0 or newer, for the GPT-6.2 Astra and Sol seats
 codex login status               # should report an authenticated account
 ```
 
@@ -129,10 +129,12 @@ powershell -ExecutionPolicy Bypass -File enable-1m-context.ps1
 From a checkout, run them in place: `./scripts/enable-1m-context.sh`, or
 `powershell -ExecutionPolicy Bypass -File scripts\enable-1m-context.ps1`.
 
-Codex ships GPT-6.1 Sol and Terra at a **500,000**-token context window (475,000 after
-its 95% headroom), and GPT-6 Astra, Sol and Luna and GPT-5.6 Sol, Terra and Luna at
-**272,000** (258,400 effective), even though the models support **1,050,000** upstream.
-Astra is no exception: a fresh astra thread reports `model_context_window: 258400`
+Codex ships GPT-6.2 Sol and GPT-6.1 Sol and Terra at a **500,000**-token context window
+(475,000 after its 95% headroom), and GPT-6.2 Astra, GPT-6 Astra, Sol and Luna and
+GPT-5.6 Sol, Terra and Luna at **272,000** (258,400 effective), even though the models
+support **1,050,000** upstream.
+Both GPT-6.2 models have a catalog ceiling of **872,000**. Astra is no exception:
+a fresh astra thread reports `model_context_window: 258400`
 until this script runs. The documented override does *not* lift it to 1.05M either:
 
 ```toml
@@ -156,12 +158,12 @@ context window"* instead of compacting. At 950,000 codex compacts at 855,000.
 Run it once, then restart Claude Desktop — the catalog is read at app-server startup.
 The copy is also codex's model list: while `model_catalog_json` is set, codex stops
 fetching its catalog, so the Codex app and the CLI list only the models the copy held
-the day it was built. A model released since stays hidden — GPT-6.1 Sol and Terra,
-GPT-6 Sol and GPT-6 Luna did, on a copy from before them — until the script runs again.
+the day it was built. A model released since stays hidden — a catalog built before
+2026-11-17 hides GPT-6.2 Astra and Sol — until the script runs again.
 So re-run it after upgrading codex and whenever OpenAI releases a model: it lifts the
 override for that one catalog fetch and puts it back, and it says so, loudly, when a
 model it meant to raise is not in what codex fetched. A model from a line the script
-does not list yet — a GPT-6.2, say — is shown at the stock cap until the script adds it.
+does not list yet is shown at the stock cap until the script adds it.
 `--revert` restores the stock catalog; `--no-verify` skips the live check
 (`-Revert` and `-NoVerify` in the PowerShell edition).
 
@@ -192,13 +194,14 @@ reached the bridge (not only `codex exec`), run `python3 tests/context_live.py`.
 | `codex_compact` | Summarise the thread's history now, at a boundary you choose |
 
 Models. A family name always runs that family's newest model:
-`astra-medium|astra-high|astra-xhigh|astra-max|astra-ultra` (GPT-6 Astra) ·
-`sol-medium|sol-high|sol-xhigh|sol-max|sol-ultra` (GPT-6.1 Sol) ·
+`astra-medium|astra-high|astra-xhigh|astra-max|astra-ultra` (GPT-6.2 Astra) ·
+`sol-medium|sol-high|sol-xhigh|sol-max|sol-ultra` (GPT-6.2 Sol) ·
 `luna-low|luna-medium|luna-high|luna-xhigh|luna-max` (GPT-6 Luna) ·
 `terra-medium|terra-high|terra-xhigh|terra-max|terra-ultra` (GPT-6.1 Terra).
 
 To run one specific model, pin it by name: the model's own slug plus the effort. The
-pinned names are `gpt-6.1-sol-medium|…|ultra`, `gpt-6.1-terra-medium|…|ultra`,
+pinned names are `gpt-6.2-astra-medium|…|ultra`, `gpt-6.2-sol-medium|…|ultra`,
+`gpt-6.1-sol-medium|…|ultra`, `gpt-6.1-terra-medium|…|ultra`,
 `gpt-6-sol-medium|…|ultra`, `gpt-6-luna-low|…|max`, `gpt-6-astra-medium|…|ultra`,
 `gpt-5.6-sol-medium|…|ultra`, `gpt-5.6-terra-medium|…|ultra` and `gpt-5.6-luna-low|…|max`.
 A pinned name offers the same effort levels as its family, and it never moves when
@@ -207,9 +210,9 @@ asks for a specific model.
 
 Some threads ran on a model their family has since left: a thread from before this
 change, or another client's thread. `codex_poll` and `codex_fork` report such a thread
-under its pinned name (`gpt-5.6-terra-high`, say), so they show the model it really
-ran on, and a fork stays on that model. A thread on a family's current model reads
-back under the family name.
+under its pinned name (`gpt-6-astra-high` or `gpt-6.1-sol-high`, say), so they show the
+model it really ran on, and a fork stays on that model. A thread on a family's
+current model reads back under the family name.
 
 A steer is a submit to a thread whose turn is still running. It carries input only, so
 it cannot change that turn's model. Any name for the running model steers:
@@ -227,9 +230,10 @@ fewer, stronger threads then process those results, and so on up. Split for
 parallelism, not for length — coherent, closely-coupled work belongs in one thread,
 and what matters survives compaction.
 
-`astra-*` is GPT-6 Astra (codex 0.153.1+). Astra, Sol and Terra are exposed from
-`medium` up to `ultra` — there is no `astra-low`, `sol-low` or `terra-low`; Luna is the
-scout, and runs `low` through `max` (codex offers Luna no `ultra`). `max` rarely improves
+`astra-*` is GPT-6.2 Astra and `sol-*` is GPT-6.2 Sol (codex 0.170.0+). Astra, Sol and
+Terra are exposed from `medium` up to `ultra` — there is no `astra-low`, `sol-low` or
+`terra-low`; Luna is the scout, and runs `low` through `max` (codex offers Luna no
+`ultra`). `max` rarely improves
 on `xhigh`. `ultra` (Sol, Terra and Astra) is not "more than max": each agent runs at
 `xhigh` and proactive sub-agent delegation switches on — breadth, not depth. It pays
 only when the work splits into substantial independent parts; on small or
