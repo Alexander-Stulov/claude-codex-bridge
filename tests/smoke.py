@@ -1165,3 +1165,100 @@ assert _st["activity"]["now"] == "compacting context" and "compactions" not in _
 bridge.APP._push_item(_st, {"type": "contextCompaction", "id": "c1"}, True)
 assert _st["activity"]["compactions"] == 1, _st["activity"]
 print("smoke: a compaction is counted once, when it completes")
+
+# --- attachments: an image goes as an image, any other file goes by its path --------------
+# codex turns a non-image localImage into a placeholder and the turn still "completes"
+# with the model unable to read it (observed live 2026-11-18 with a PDF, a text file and a
+# text file named .png). Decided by the bytes, because the name proved nothing there.
+_d = _tf.mkdtemp()
+for _name, _bytes in (("shot.png", b"\x89PNG\r\n\x1a\n...."), ("photo.jpg", b"\xff\xd8\xff\xe0...."),
+                      ("anim.gif", b"GIF89a...."), ("pic.webp", b"RIFF\x10\x00\x00\x00WEBPVP8 "),
+                      ("report.pdf", b"%PDF-1.4\n"), ("fake.png", b"just text\n")):
+    open(os.path.join(_d, _name), "wb").write(_bytes)
+_items = bridge.build_input("look", ["shot.png", "photo.jpg", "anim.gif", "pic.webp", "report.pdf", "fake.png"], _d)
+assert [i["type"] for i in _items[1:5]] == ["localImage"] * 4, _items
+_notes = _items[5:]
+assert [i["type"] for i in _notes] == ["text", "text"], _items
+for _note, _name in zip(_notes, ("report.pdf", "fake.png")):
+    assert os.path.realpath(os.path.join(_d, _name)) in _note["text"], _note
+try:
+    bridge.build_input("look", ["missing.pdf"], _d)
+    raise AssertionError("a missing file was accepted")
+except ValueError as e:
+    assert "not found" in str(e), e
+print("smoke: images attach as images; any other file reaches codex by its path")
+
+# --- output files: whatever a turn produced, of any type, is named by codex_poll ----------
+_now = time.time()
+_work, _elsewhere = os.path.realpath(_tf.mkdtemp(prefix="work-")), os.path.realpath(_tf.mkdtemp(prefix="gen-"))
+def _touch(path, age=0, data=b"x"):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "wb").write(data)
+    os.utime(path, (_now - age, _now - age))
+    return path
+_img = _touch(os.path.join(_elsewhere, "exec-1.png"), data=b"png-bytes")
+_pdf = _touch(os.path.join(_work, "out", "report.pdf"), data=b"%PDF-1.4")            # a script wrote this
+_edit = _touch(os.path.join(_work, "notes.md"))
+_moved = _touch(os.path.join(_work, "renamed.txt"))
+_touch(os.path.join(_work, "reference.jpg"), age=3600)                               # was already there
+_touch(os.path.join(_work, ".git", "index"))
+_touch(os.path.join(_work, "node_modules", "pkg", "index.js"))
+
+def _output_thread(tid, mode="write"):
+    st = bridge._new_thread_state(tid, _work, mode, "luna-medium")
+    st.update(started_at=_now - 60, terminal_at=_now + 1, state="completed", output="done", turn_id="u1")
+    bridge.APP.threads[tid] = st
+    return st
+
+_st = _output_thread("t91")
+_b64 = "A" * 4096
+bridge.APP._push_item(_st, {"type": "imageGeneration", "id": "i0", "status": "in_progress", "result": ""}, False)
+bridge.APP._push_item(_st, {"type": "imageGeneration", "id": "i1", "status": "completed", "savedPath": _img, "result": _b64}, True)
+bridge.APP._push_item(_st, {"type": "imageGeneration", "id": "i2", "status": "failed", "savedPath": None, "result": ""}, True)
+assert _st["activity"]["images_generated"] == 1, _st["activity"]
+assert _b64 not in json.dumps(_st), "generated image data must never be held by the bridge"
+bridge.APP._push_item(_st, {"type": "fileChange", "id": "f1", "status": "completed", "changes": [
+    {"path": "notes.md", "kind": {"type": "add"}, "diff": "+x"},
+    {"path": os.path.join(_work, "gone.txt"), "kind": {"type": "delete"}, "diff": "-x"},
+    {"path": "old.txt", "kind": {"type": "update", "move_path": _moved}, "diff": ""}]}, True)
+bridge.APP._push_item(_st, {"type": "fileChange", "id": "f2", "status": "failed", "changes": [
+    {"path": "never.txt", "kind": {"type": "add"}, "diff": "+x"}]}, True)
+_real_gen = _st["gen"]
+_polled = bridge.codex_poll({"thread": "t91"})
+_files = {f["path"]: f for f in _polled["output_files"]}
+assert set(_files) == {_img, _pdf, _edit, _moved}, sorted(_files)
+assert _files[_img]["source"] == "image_generation" and _files[_img]["bytes"] == 9, _files[_img]
+assert _files[_edit]["source"] == "file_change" and _files[_edit]["kind"] == "add", _files[_edit]
+assert _files[_moved]["source"] == "file_change", _files[_moved]
+assert _files[_pdf]["source"] == "modified_during_turn", _files[_pdf]
+assert bridge.codex_poll({"thread": "t91"})["output_files"] == _polled["output_files"], "polls must repeat"
+
+# a read turn wrote nothing of its own, so what changed around it is not its output
+_output_thread("t92", mode="read")
+assert "output_files" not in bridge.codex_poll({"thread": "t92"}), "a read turn claimed workspace files"
+
+# a long list is capped, and says how much it left out
+_real_cap, bridge.MAX_OUTPUT_FILES = bridge.MAX_OUTPUT_FILES, 2
+try:
+    _output_thread("t93")
+    _capped = bridge.codex_poll({"thread": "t93"})
+    assert len(_capped["output_files"]) == 2 and _capped["output_files_omitted"] == 1, _capped
+finally:
+    bridge.MAX_OUTPUT_FILES = _real_cap
+
+# a thread read back from codex reports the same files, from the saved turn
+_st = bridge._new_thread_state("t94", _work, None, "luna-medium")
+bridge._adopt_thread_record(_st, {"turns": [{"id": "u9", "status": "completed", "startedAt": int(_now - 60),
+    "completedAt": int(_now + 1), "items": [
+        {"type": "imageGeneration", "id": "i9", "status": "completed", "savedPath": _img, "result": _b64},
+        {"type": "agentMessage", "id": "m9", "text": "done"}]}]})
+assert _b64 not in json.dumps(_st), "a read-back turn must not keep the image data"
+_cold = {f["path"]: f["source"] for f in bridge.turn_output_files(_st)[0]}
+assert _cold[_img] == "image_generation" and _cold[_pdf] == "modified_during_turn", _cold
+bridge.APP.threads.clear()
+
+for marker in ("output_files", "modified_during_turn"):
+    assert marker in bridge.INSTRUCTIONS, f"instructions missing {marker!r}"
+assert "confined to cwd" not in bridge.INSTRUCTIONS.replace("confined to cwd and the system temp", ""), \
+    "the sandbox also allows the system temp folders"
+print("smoke: codex_poll names every output file, of any type, without holding its contents")

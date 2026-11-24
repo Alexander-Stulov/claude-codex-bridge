@@ -40,7 +40,7 @@ directory, so a brand-new project or a worktree parked anywhere works the moment
 it exists — or, when no cwd is given, in a private scratch workspace under
 ~/.claude-codex-bridge/scratch/. The only refusals are whole-machine targets
 (filesystem root, your home directory, system directories); real containment is
-the codex sandbox, which confines writes to cwd. On Windows that sandbox is off
+the codex sandbox, which confines writes to cwd and the system temp folders. On Windows that sandbox is off
 until config.toml enables it ([windows] sandbox = "unelevated"), and codex would
 otherwise run every approved command with no filesystem boundary — so the bridge
 refuses to dispatch until codex reports the sandbox ready. Provenance is stamped
@@ -75,29 +75,31 @@ POLL, DON'T BLOCK: after codex_submit, call codex_poll(thread) every 20-30s and 
 
 BRIEFS: the prompt is all codex sees for a new thread - state the goal, constraints, exact repo-relative paths, and what the answer should contain. Follow-up turns keep the thread's context, so they can be short.
 
-SIZE THE DELIVERABLE: ask for the answer as the turn's OUTPUT, not as a report file. Output is capped by the model's own output limit, comes back whole through codex_poll, and its shape can be ENFORCED with output_schema (maxItems, maxLength) instead of merely requested. A file has none of that: it grows with the surface until nobody can read it, and this bridge cannot even see it. Write files only when the file IS the work product - source changes, a document that has to live in the repo. For a survey or a set of findings, the answer is the answer.
+SIZE THE DELIVERABLE: ask for the answer as the turn's OUTPUT, not as a report file. Output is capped by the model's own output limit, comes back whole through codex_poll, and its shape can be ENFORCED with output_schema (maxItems, maxLength) instead of merely requested. A file has none of that: it grows with the surface until nobody can read it, and this bridge returns only its path. Write files only when the file IS the work product - source changes, a document that has to live in the repo. For a survey or a set of findings, the answer is the answer.
 
 Then bound it, because a survey still grows with the surface unless the brief says otherwise. Give a hard cap (items or lines) and require an index. The cap is the part that works: budgeting one row per item still scales linearly, so a 5000-item sweep overruns any readable size anyway. So also say what happens when the items do NOT fit - counts and patterns plus the exceptions worth naming, never a truncated enumeration. A complete list nobody can read is a failed deliverable, not a thorough one.
 
 MODELS by task weight: luna-medium/high = GPT-6 Luna, scouting and mechanical extraction - scout here whatever the follow-up is, then hand the findings to the model that does the work. Shape it as a pyramid: many cheap scouts, one per area, each finishing inside its runway and returning findings verbatim; fewer, stronger threads then process those results, and so on up; terra-medium/high = GPT-6.1 Terra, everyday analysis, drafting, second opinions; sol-high/xhigh = GPT-6.2 Sol, complex implementation and debugging; astra-high/xhigh = GPT-6.2 Astra, the heavyweight for hard or ambiguous work, long-context runs, terminal-heavy agentic work, and independent review. These family names always run the family's newest model. A pinned name - the model's own slug plus effort, e.g. gpt-5.6-sol-high or gpt-6.1-sol-xhigh - runs exactly that model; use one only when the user asks for a specific model. max rarely improves on xhigh - reserve it for a problem xhigh has already failed. ultra (sol/terra/astra) is not more than max: each agent runs at xhigh and proactive sub-agent delegation switches on - faster only when the work splits into substantial independent parts; on small or tightly-coupled work it costs more, takes as long, and is no better - max wins there.
 
-WHERE IT WORKS: cwd is the one location knob - any existing directory, normally the folder the calling session is already in. Nothing to register: a new project or a worktree parked anywhere works immediately. Reads still see the surrounding repo; writes are confined to cwd, so point it at the repo for repo-wide work or at a subdirectory to contain the blast radius. Omit it for work that needs no repo (research, reasoning, throwaway code) and the thread gets a private scratch workspace - the result says workspace: scratch. mode is write (default) or read. Point concurrent write threads at different cwd (e.g. separate worktrees) and they cannot collide. On Windows the bridge dispatches only while codex's own sandbox is enabled; codex_check reports windows_sandbox and the fix when it is not.
+WHERE IT WORKS: cwd is the one location knob - any existing directory, normally the folder the calling session is already in. Nothing to register: a new project or a worktree parked anywhere works immediately. Reads still see the surrounding repo; writes are confined to cwd and the system temp folders, so point it at the repo for repo-wide work or at a subdirectory to contain the blast radius. Omit it for work that needs no repo (research, reasoning, throwaway code) and the thread gets a private scratch workspace - the result says workspace: scratch. mode is write (default) or read. Point concurrent write threads at different cwd (e.g. separate worktrees) and they cannot collide. On Windows the bridge dispatches only while codex's own sandbox is enabled; codex_check reports windows_sandbox and the fix when it is not.
 
 CAPABILITIES: codex arrives with plugins (skills), MCP servers and connected apps of its own, beyond files and shell. Before briefing work that might lean on one - research, documents, decks, spreadsheets, browsing, desktop control, an external service - call codex_capabilities: it lists every enabled plugin with the $skill mentions it contributes, every MCP server with its tools, and the connected apps; query narrows it. Invoke a skill by passing its name in codex_submit's skills (skills: ["deep-research-work:deep-research"], or just "deep-research" when that is unique) - the bridge injects the skill's instructions into the turn; a $mention typed into the prompt is not honoured through the app-server. An app is mentioned in the prompt as [$Name](app://id); MCP tools by name. Skills also fire implicitly when the brief matches their description.
 
 PLUGINS: three worth knowing. deep-research (skills: ["deep-research"]) is OpenAI Deep Research inside codex - multi-pass web research with cited sources, the capability Cowork and Code threads lack natively. Through codex it is metered against the account's Codex/Work usage allowance rather than the Chat deep-research task quota (OpenAI help center, September 2026), and it is the most expensive thing a thread does - one run reads well over a million tokens - so spend it on questions that merit it, and run it on sol-high/xhigh or astra, never a scout. Ask for the report in chat - say no document, deck or site - with a Sources section; codex_poll returns it whole. When it is worth keeping, and it usually is, add a turn on the same thread with cwd set to the project and ask codex to save the report to a markdown file (docs/research/<topic>.md, say) - it writes it verbatim with every source, in about a minute on terra-medium; or write a condensed version yourself from the poll output. The bridge stores nothing. Its clarifying questions cannot reach you through this bridge yet, so tell it to state assumptions and proceed. Chrome is the user's real Google Chrome through the ChatGPT Chrome extension - logged-in sessions, open tabs, page content - and the easy way to work with web pages: codex itself prefers it over Computer Use for anything in a browser. Ask for the Chrome plugin by name and tell codex to call the cua_repl js tool directly - its first call is cua.createBrowserTab("chrome", url, {sessionName}) - because cua_repl's tools are kept out of codex's code-mode exec tool, and a model that goes looking for a chrome tool in there concludes the plugin is unreachable. Each new site raises an elicitation (tool access_browser_origin) that allow grants once and allow_class grants for good. Computer Use is native macOS app control through the Codex Computer Use app, and it runs through the same cua_repl js tool as Chrome (plugin unified-computer-use): ask for Computer Use by name and codex opens the app with cua.getApp; the first use of each app raises an elicitation (tool get_app_state, persist_modes session and always) that allow grants once, allow_always for the session, allow_class for good. A computer-use MCP server listed with no tools is a legacy config.toml entry, not the capability - ignore it. Documents, presentations, spreadsheets, pdf, visualize, sites and the rest appear in codex_capabilities with their mentions.
 
-NETWORK: codex has network access in both modes, always - web search, http, package installs, git remotes; there is nothing to enable or approve. Containment is the sandbox (writes confined to cwd), not the network.
+NETWORK: codex has network access in both modes, always - web search, http, package installs, git remotes; there is nothing to enable or approve. Containment is the sandbox (writes confined to cwd and the system temp folders), not the network.
 
 JSON ANY TIME: pass output_schema on any turn - new or existing thread - and that turn's final message is constrained to it. Omit it for prose.
 
-IMAGES: pass images on any turn - a list of file paths (absolute or relative to cwd) or http(s)/data URLs. Screenshots, mockups, diagrams, a rendering that looks wrong. A bad path is rejected before the turn starts.
+ATTACHMENTS: pass images on any turn - a list of file paths (absolute or relative to cwd) or http(s)/data URLs. Screenshots, mockups, diagrams, a rendering that looks wrong. A PNG, JPEG, GIF or WebP reaches the model as an image; any other file (a PDF, a document, data) reaches codex by its path and codex opens it with its own tools. A bad path is rejected before the turn starts.
+
+OUTPUT FILES: when a turn ends, codex_poll lists what it produced in output_files, whatever the file type: path, bytes and source. image_generation is an image codex generated, saved under its own home rather than in cwd; file_change is a file codex patched; modified_during_turn is a file under cwd that changed while the turn ran, such as a PDF a script wrote, and can include edits made by anyone else working there. Open or copy these paths yourself - there is no need to ask codex to copy anything. A file written outside cwd is listed only if it is a generated image, so ask codex to name such a path in its answer. output_files_omitted counts entries past the first 100, and output_files_incomplete means a very large cwd was not fully checked.
 
 APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, codex hit the sandbox boundary or a suspicious-command rule; the request and the thread's declared scope come with it. Decide, then codex_approve(request_id, allow|allow_always|deny) and keep polling - allow_always covers that exact command again, and allow_class covers the whole command class when the request offers proposed_execpolicy_amendment (the one that stops a build loop re-prompting on every git add). allow_class writes an allow rule into codex's execpolicy: it outlives this session, and commands it matches run outside the sandbox from then on - grant it only for classes you would trust with the whole machine tomorrow. An MCP server codex is using can park the thread the same way, on an elicitation (kind: elicitation): a permission prompt from that server - a browser plugin asking to open a tab, say - or a short form. The request comes with server, message, requested_schema and persist_modes. codex_approve resolves it too: allow accepts, deny declines, allow_always accepts and has it remembered for the session (allow_class: permanently) when persist_modes offers that - a mode the request did not offer is never sent, and the answer says so. When requested_schema has fields, pass the answers in grant as an object keyed by field name; required fields are checked before anything is sent, so a refused grant can be retried.
 
 RESULTS: completed carries output (text, or your schema's JSON) plus bridge-stamped provenance - trust that over anything the model says about itself. Errors come back verbatim, including schema rejections."""
 
-SERVER_INFO = {"name": "codex", "version": "0.16.5"}
+SERVER_INFO = {"name": "codex", "version": "0.17.0"}
 
 # Friendly slug -> (wire model, reasoning effort). One caller-facing knob; the
 # app-server takes them as separate per-turn fields.
@@ -356,12 +358,26 @@ def compaction_runway(window, used):
 IMAGE_URL_SCHEMES = ("http://", "https://", "data:")
 
 
+def is_image_file(path):
+    """Whether codex can show this file to the model as an image. Read from the bytes, not
+    the name: anything else sent as localImage reaches the model as an unreadable
+    placeholder, and the turn still completes."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+    except OSError:
+        return True         # unreadable from here: codex reports it in its own words
+    return (head.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"))
+            or (head[:4] == b"RIFF" and head[8:12] == b"WEBP"))
+
+
 def build_input(prompt, images, cwd, skills=None):
-    """A turn's input is a list of typed items: any skills to inject, the text, then images.
+    """A turn's input is a list of typed items: any skills to inject, the text, then attachments.
 
     A URL and a file on disk are different wire types, so the caller passes plain
-    strings and this decides. Bad paths are caught here — before the turn starts —
-    because a turn that dies on a missing file wastes the whole round trip.
+    strings and this decides. An image goes as an image; any other file goes by its path,
+    for codex to open with its own tools. Bad paths are caught here — before the turn
+    starts — because a turn that dies on a missing file wastes the whole round trip.
     """
     items = list(skills or []) + [{"type": "text", "text": str(prompt)}]
     for ref in images or []:
@@ -376,8 +392,83 @@ def build_input(prompt, images, cwd, skills=None):
         if not os.path.isfile(path):
             raise ValueError(f"image not found: {ref!r} (resolved to {path}). Pass an absolute "
                              f"path, a path relative to cwd, or an http(s)/data URL.")
-        items.append({"type": "localImage", "path": path})
+        if is_image_file(path):
+            items.append({"type": "localImage", "path": path})
+        else:
+            items.append({"type": "text", "text": f"Attached file, open it from disk: {path}"})
     return items
+
+
+# What a turn produced, of any file type. codex reports generated images and patches; a
+# file written by a command (a script's PDF, a plugin's deck) is reported by nothing, so
+# those are found by what changed under cwd while the turn ran. Paths and sizes only: the
+# bridge never holds a file's contents.
+MAX_OUTPUT_FILES = 100
+SCAN_BUDGET_SECONDS = 2
+SCAN_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".cache",
+                  ".pytest_cache", ".mypy_cache", ".next", ".turbo"}
+
+
+def record_output(st, item):
+    """Note a file a completed item says it produced. A deleted file is no output."""
+    if item.get("status") != "completed":
+        return
+    found = st.setdefault("output_items", {})
+    if item.get("type") == "imageGeneration" and item.get("savedPath"):
+        found[os.path.realpath(item.get("savedPath"))] = {"source": "image_generation"}
+    elif item.get("type") == "fileChange":
+        for change in item.get("changes") or []:
+            kind = change.get("kind") or {}
+            path = os.path.realpath(os.path.join(st["cwd"], change.get("path") or ""))
+            if kind.get("type") == "delete" or kind.get("move_path"):
+                found.pop(path, None)
+            if kind.get("type") != "delete":
+                path = os.path.realpath(os.path.join(st["cwd"], kind.get("move_path") or path))
+                found[path] = {"source": "file_change", "kind": kind.get("type")}
+
+
+def scan_workspace(cwd, since, until):
+    """Files under cwd modified in the window, newest first, and whether time ran out."""
+    hits, stack, deadline = [], [cwd], time.monotonic() + SCAN_BUDGET_SECONDS
+    while stack:
+        if time.monotonic() > deadline:
+            return sorted(hits, reverse=True), True
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name not in SCAN_SKIP_DIRS:
+                                stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            info = entry.stat(follow_symlinks=False)
+                            # codex saves turn times in whole seconds: allow for the rounding
+                            if since <= info.st_mtime <= until + 1:
+                                hits.append((info.st_mtime, entry.path, info.st_size))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return sorted(hits, reverse=True), False
+
+
+def turn_output_files(st):
+    """(files, how many the cap left out, whether the scan ran out of time). Only files that
+    exist now are listed. A read turn writes nothing, so what changed around it is not its."""
+    files = []
+    for path, info in (st.get("output_items") or {}).items():
+        try:
+            files.append({"path": path, **info, "bytes": os.path.getsize(path)})
+        except OSError:
+            continue
+    since, until = st.get("turn_window") or (st.get("started_at"), st.get("terminal_at"))
+    incomplete = False
+    if st.get("mode") != "read" and since:
+        known = {f["path"] for f in files}
+        hits, incomplete = scan_workspace(st["cwd"], since, until or st.get("terminal_at") or time.time())
+        files += [{"path": path, "source": "modified_during_turn", "bytes": size}
+                  for _, path, size in hits if path not in known]
+    return files[:MAX_OUTPUT_FILES], max(0, len(files) - MAX_OUTPUT_FILES), incomplete
 
 
 class CodexError(Exception):
@@ -724,7 +815,14 @@ class AppServer:
 
     def _push_item(self, st, item, completed):
         t = item.get("type")
-        if t == "commandExecution":
+        if completed:
+            record_output(st, item)
+        if t == "imageGeneration":
+            if not completed:
+                self._note(st, now="generating an image")
+            elif item.get("status") == "completed":
+                self._note(st, images_generated=1)
+        elif t == "commandExecution":
             if completed:
                 self._note(st, commands=1)
                 if item.get("exitCode"):
@@ -810,6 +908,7 @@ def _new_thread_state(tid, cwd, mode, model_slug, kind="project"):
             "structured": False,
             "output": None, "error": None, "final_message": None, "usage": None,
             "duration_ms": None, "terminal_at": None,
+            "output_items": {}, "output_view": None, "turn_window": None,
             "started_at": time.time(), "changed_at": time.time()}
 
 
@@ -926,10 +1025,13 @@ def _adopt_thread_record(st, thread):
     last = turns[-1] if turns else {}
     st["turn_id"] = last.get("id") or st.get("turn_id")
     st["duration_ms"] = last.get("durationMs")
+    st.update(output_items={}, output_view=None, turn_window=(last.get("startedAt"), last.get("completedAt")))
 
     items_view = last.get("itemsView")
     text, truncated = "", items_view not in (None, "Full", "full")
     for it in last.get("items") or []:
+        if isinstance(it, dict):
+            record_output(st, it)
         if isinstance(it, dict) and it.get("type") == "agentMessage" and it.get("text"):
             text = it["text"]
     # A recovered poll must not hand back a JSON string where the first poll gave an object.
@@ -1089,7 +1191,7 @@ def codex_check(_args):
 
 
 NETWORK_NOTE = ("always on in both modes — web search, http, package installs, git remotes; nothing to "
-                "enable or approve. Containment is the sandbox (writes confined to cwd), not the network.")
+                "enable or approve. Containment is the sandbox (writes confined to cwd and the system temp folders), not the network.")
 HOW_TO_USE = ("pass a skill's name in codex_submit's skills (deep-research-work:deep-research, or just "
               "deep-research when that is unique) and the bridge injects its instructions into the turn — a "
               "$mention typed into the prompt is not honoured through the app-server. An app is mentioned in the "
@@ -1376,7 +1478,7 @@ def codex_submit(args):
                    "started_at": time.time(), "changed_at": time.time(), "activity": {},
                    "state": "running", "output": None, "error": None, "final_message": None,
                    "usage": None, "duration_ms": None, "output_unavailable": None,
-                   "active_flags": None})
+                   "active_flags": None, "output_items": {}, "output_view": None, "turn_window": None})
     params = {"threadId": tid, "input": turn_input,
               "cwd": cwd, "model": wire_model, "effort": effort,
               "sandboxPolicy": sandbox_policy(mode),
@@ -1473,6 +1575,20 @@ def codex_poll(args):
             out["error"] = st.get("error")
             out["output"] = st.get("output")
             out["provenance"] = _provenance(st)
+        turn_id, view = st.get("turn_id"), st.get("output_view")
+    if state in ("completed", "failed", "interrupted"):
+        if view is None:
+            # Outside the lock: the walk touches the disk, and the reader must not wait on it.
+            files, omitted, incomplete = turn_output_files(st)
+            view = {"output_files": files} if files else {}
+            if omitted:
+                view["output_files_omitted"] = omitted
+            if incomplete:
+                view["output_files_incomplete"] = True
+            with APP.lock:
+                if st.get("turn_id") == turn_id:    # never file this under a turn started since
+                    st["output_view"] = view
+        out.update(view)
     prune_threads()
     return out
 
@@ -1756,11 +1872,11 @@ TOOLS = [
             "model": {"type": "string", "enum": sorted(MODELS),
                       "description": "luna=GPT-6 Luna, scouting, then hand findings to the model that does the work; terra=GPT-6.1 Terra, everyday work; sol=GPT-6.2 Sol, complex implementation; astra=GPT-6.2 Astra, heavyweight for hard, long-context or agentic work and independent review. Family names always run the family's newest model. A pinned name (model slug plus effort, e.g. gpt-5.6-sol-high) runs exactly that model: use it only when the user asks for a specific model. Effort: high/xhigh are the working range; max rarely improves on xhigh; ultra = xhigh plus proactive sub-agent delegation, for work that splits into substantial independent parts (max for small or tightly-coupled work)."},
             "thread": {"type": "string", "description": "Continue this thread. Omit to start a new one."},
-            "cwd": {"type": "string", "description": "Absolute path to the directory to work in — normally the folder this session is already in. Any existing directory works; nothing needs registering. Reads still see the surrounding repo; writes are confined here, so aim it at the narrowest directory the writes should reach. Omit for work that needs no repo (research, reasoning, throwaway code): the thread gets a private scratch workspace. Point concurrent write threads at different cwd (e.g. worktrees) and they cannot collide."},
+            "cwd": {"type": "string", "description": "Absolute path to the directory to work in — normally the folder this session is already in. Any existing directory works; nothing needs registering. Reads still see the surrounding repo; writes are confined here and to the system temp folders, so aim it at the narrowest directory the writes should reach. Omit for work that needs no repo (research, reasoning, throwaway code): the thread gets a private scratch workspace. Point concurrent write threads at different cwd (e.g. worktrees) and they cannot collide."},
             "mode": {"type": "string", "enum": list(MODES), "description": "write (default) or read. Both keep network access (always on) and the full tool surface."},
             "output_schema": {"type": ["object", "string"], "description": "JSON Schema constraining this turn's final message. Omit for prose."},
             "images": {"type": "array", "items": {"type": "string"},
-                       "description": "Images to send with this turn — screenshots, mockups, diagrams, a failing UI. Each entry is a file path (absolute, or relative to cwd) or an http(s)/data URL. Works on any turn, new thread or follow-up."},
+                       "description": "Files to send with this turn — screenshots, mockups, diagrams, a failing UI, or any other file. Each entry is a file path (absolute, or relative to cwd) or an http(s)/data URL. A PNG, JPEG, GIF or WebP reaches the model as an image; any other file reaches codex by its path. Works on any turn, new thread or follow-up."},
             "skills": {"type": "array", "items": {"type": "string"},
                        "description": "Skills to inject into this turn, by the names codex_capabilities lists (deep-research-work:deep-research, or just deep-research when that is unique). Each skill's instructions go on the wire with the input — a $mention typed into the prompt is not honoured. Unknown, ambiguous or disabled names are rejected before the turn starts."}},
             "required": ["prompt", "model"], "additionalProperties": False},
@@ -1786,7 +1902,7 @@ TOOLS = [
                         "failed), an activity snapshot (what it is doing and how much it has done), the "
                         "pending approval request(s) when it is waiting — a command, file change, permission "
                         "or an MCP elicitation, each with what is being asked — and the complete output "
-                        "once it is done. Idempotent — nothing is consumed, and the answer arrives whole rather than in "
+                        "once it is done, with output_files naming the files the turn produced. Idempotent — nothing is consumed, and the answer arrives whole rather than in "
                         "pieces to reassemble. Poll every 20-30s and relay activity in plain language. A thread this "
                         "bridge is not running is read from codex's saved record without taking it (read_only: true): "
                         "its latest results, never its approvals, which belong to the process running it."),
