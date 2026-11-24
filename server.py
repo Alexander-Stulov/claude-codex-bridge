@@ -47,6 +47,7 @@ refuses to dispatch until codex reports the sandbox ready. Provenance is stamped
 by the bridge from run parameters — never from the model's self-report. Logs go
 to stderr; stdout carries only newline-delimited JSON-RPC.
 """
+import filecmp
 import itertools
 import json
 import os
@@ -93,7 +94,7 @@ JSON ANY TIME: pass output_schema on any turn - new or existing thread - and tha
 
 ATTACHMENTS: pass images on any turn - a list of file paths (absolute or relative to cwd) or http(s)/data URLs. Screenshots, mockups, diagrams, a rendering that looks wrong. A PNG, JPEG, GIF or WebP reaches the model as an image; any other file (a PDF, a document, data) reaches codex by its path and codex opens it with its own tools. A bad path is rejected before the turn starts.
 
-OUTPUT FILES: when a turn ends, codex_poll lists what it produced in output_files, whatever the file type: path, bytes and source. image_generation is an image codex generated, saved under its own home rather than in cwd; file_change is a file codex patched; modified_during_turn is a file under cwd that changed while the turn ran, such as a PDF a script wrote, and can include edits made by anyone else working there. Open or copy these paths yourself - there is no need to ask codex to copy anything. A file written outside cwd is listed only if it is a generated image, so ask codex to name such a path in its answer. output_files_omitted counts entries past the first 100, and output_files_incomplete means a very large cwd was not fully checked.
+OUTPUT FILES: when a turn ends, codex_poll lists the files it produced in output_files, whatever their type - a document, a PDF, a deck, an image, source code - each with path, bytes and source. reported is a file codex itself reported writing; some of its tools save under codex's own home rather than in cwd. modified_during_turn is a file under cwd that changed while the turn ran, such as a PDF a script wrote, and can include edits made by anyone else working there. To take the files, pass copy_to on codex_poll - a folder, absolute or relative to cwd: the bridge copies every listed file there itself, outside codex's sandbox and yours, and each entry gains copied_to. A file under cwd keeps its relative path, a file already in that folder is left alone, and a different file already at the destination is never replaced - that entry carries copy_error instead. Do not ask codex to copy its outputs to you: it does not always know where its own tools saved them. A file a command wrote outside cwd is not listed, so have codex write into cwd or name the path in its answer. output_files_omitted counts entries past the first 100, and output_files_incomplete means a very large cwd was not fully checked.
 
 APPROVALS: in-scope work never asks. When codex_poll returns awaiting_approval, codex hit the sandbox boundary or a suspicious-command rule; the request and the thread's declared scope come with it. Decide, then codex_approve(request_id, allow|allow_always|deny) and keep polling - allow_always covers that exact command again, and allow_class covers the whole command class when the request offers proposed_execpolicy_amendment (the one that stops a build loop re-prompting on every git add). allow_class writes an allow rule into codex's execpolicy: it outlives this session, and commands it matches run outside the sandbox from then on - grant it only for classes you would trust with the whole machine tomorrow. An MCP server codex is using can park the thread the same way, on an elicitation (kind: elicitation): a permission prompt from that server - a browser plugin asking to open a tab, say - or a short form. The request comes with server, message, requested_schema and persist_modes. codex_approve resolves it too: allow accepts, deny declines, allow_always accepts and has it remembered for the session (allow_class: permanently) when persist_modes offers that - a mode the request did not offer is never sent, and the answer says so. When requested_schema has fields, pass the answers in grant as an object keyed by field name; required fields are checked before anything is sent, so a refused grant can be retried.
 
@@ -399,10 +400,11 @@ def build_input(prompt, images, cwd, skills=None):
     return items
 
 
-# What a turn produced, of any file type. codex reports generated images and patches; a
-# file written by a command (a script's PDF, a plugin's deck) is reported by nothing, so
-# those are found by what changed under cwd while the turn ran. Paths and sizes only: the
-# bridge never holds a file's contents.
+# What a turn produced, of any file type, under one rule. codex reports some files itself:
+# a patch, or a file one of its tools saved, which can lie outside cwd. A file written by a
+# command (a script's PDF, a plugin's deck) is reported by nothing, so those are found by
+# what changed under cwd while the turn ran. Paths and sizes only: the bridge never holds a
+# file's contents.
 MAX_OUTPUT_FILES = 100
 SCAN_BUDGET_SECONDS = 2
 SCAN_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".cache",
@@ -410,21 +412,28 @@ SCAN_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".cach
 
 
 def record_output(st, item):
-    """Note a file a completed item says it produced. A deleted file is no output."""
+    """Note the files a completed item says it wrote, whichever tool wrote them. A deleted
+    file is no output."""
     if item.get("status") != "completed":
         return
-    found = st.setdefault("output_items", {})
-    if item.get("type") == "imageGeneration" and item.get("savedPath"):
-        found[os.path.realpath(item.get("savedPath"))] = {"source": "image_generation"}
-    elif item.get("type") == "fileChange":
-        for change in item.get("changes") or []:
-            kind = change.get("kind") or {}
-            path = os.path.realpath(os.path.join(st["cwd"], change.get("path") or ""))
-            if kind.get("type") == "delete" or kind.get("move_path"):
-                found.pop(path, None)
-            if kind.get("type") != "delete":
-                path = os.path.realpath(os.path.join(st["cwd"], kind.get("move_path") or path))
-                found[path] = {"source": "file_change", "kind": kind.get("type")}
+    found = st.setdefault("output_items", [])
+    wrote, gone = [], []
+    if item.get("savedPath"):
+        wrote.append(item.get("savedPath"))
+    for change in (item.get("changes") or []) if item.get("type") == "fileChange" else []:
+        kind = change.get("kind") or {}
+        if kind.get("type") == "delete" or kind.get("move_path"):
+            gone.append(change.get("path") or "")
+        if kind.get("type") != "delete":
+            wrote.append(kind.get("move_path") or change.get("path") or "")
+    for path in gone:
+        path = os.path.realpath(os.path.join(st["cwd"], path))
+        if path in found:
+            found.remove(path)
+    for path in wrote:
+        path = os.path.realpath(os.path.join(st["cwd"], path))
+        if path not in found:
+            found.append(path)
 
 
 def scan_workspace(cwd, since, until):
@@ -456,9 +465,9 @@ def turn_output_files(st):
     """(files, how many the cap left out, whether the scan ran out of time). Only files that
     exist now are listed. A read turn writes nothing, so what changed around it is not its."""
     files = []
-    for path, info in (st.get("output_items") or {}).items():
+    for path in st.get("output_items") or []:
         try:
-            files.append({"path": path, **info, "bytes": os.path.getsize(path)})
+            files.append({"path": path, "bytes": os.path.getsize(path), "source": "reported"})
         except OSError:
             continue
     since, until = st.get("turn_window") or (st.get("started_at"), st.get("terminal_at"))
@@ -466,9 +475,42 @@ def turn_output_files(st):
     if st.get("mode") != "read" and since:
         known = {f["path"] for f in files}
         hits, incomplete = scan_workspace(st["cwd"], since, until or st.get("terminal_at") or time.time())
-        files += [{"path": path, "source": "modified_during_turn", "bytes": size}
+        files += [{"path": path, "bytes": size, "source": "modified_during_turn"}
                   for _, path, size in hits if path not in known]
     return files[:MAX_OUTPUT_FILES], max(0, len(files) - MAX_OUTPUT_FILES), incomplete
+
+
+def is_under(path, root):
+    try:
+        return os.path.commonpath([os.path.normcase(path), os.path.normcase(root)]) == os.path.normcase(root)
+    except ValueError:          # different drives on Windows
+        return False
+
+
+def copy_outputs(files, cwd, dest):
+    """Copy the listed files into dest and say where each landed. The bridge does this itself
+    because it is the one party no sandbox confines: codex may be unable to write to the
+    caller's folder, and the caller may be unable to read codex's. A file under cwd keeps its
+    place relative to cwd, any other goes in by name. A file already inside dest is left where
+    it is, and a different file already at the destination is never replaced."""
+    out = []
+    for f in files:
+        src = f["path"]
+        if is_under(src, dest):
+            out.append(f)
+            continue
+        target = os.path.join(dest, os.path.relpath(src, cwd) if is_under(src, cwd) else os.path.basename(src))
+        try:
+            if not os.path.exists(target):
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copyfile(src, target)
+            elif not filecmp.cmp(src, target, shallow=False):
+                out.append({**f, "copy_error": f"a different file is already at {target}"})
+                continue
+            out.append({**f, "copied_to": target})
+        except OSError as e:
+            out.append({**f, "copy_error": str(e)})
+    return out
 
 
 class CodexError(Exception):
@@ -817,12 +859,7 @@ class AppServer:
         t = item.get("type")
         if completed:
             record_output(st, item)
-        if t == "imageGeneration":
-            if not completed:
-                self._note(st, now="generating an image")
-            elif item.get("status") == "completed":
-                self._note(st, images_generated=1)
-        elif t == "commandExecution":
+        if t == "commandExecution":
             if completed:
                 self._note(st, commands=1)
                 if item.get("exitCode"):
@@ -908,7 +945,7 @@ def _new_thread_state(tid, cwd, mode, model_slug, kind="project"):
             "structured": False,
             "output": None, "error": None, "final_message": None, "usage": None,
             "duration_ms": None, "terminal_at": None,
-            "output_items": {}, "output_view": None, "turn_window": None,
+            "output_items": [], "output_view": None, "turn_window": None,
             "started_at": time.time(), "changed_at": time.time()}
 
 
@@ -1025,7 +1062,7 @@ def _adopt_thread_record(st, thread):
     last = turns[-1] if turns else {}
     st["turn_id"] = last.get("id") or st.get("turn_id")
     st["duration_ms"] = last.get("durationMs")
-    st.update(output_items={}, output_view=None, turn_window=(last.get("startedAt"), last.get("completedAt")))
+    st.update(output_items=[], output_view=None, turn_window=(last.get("startedAt"), last.get("completedAt")))
 
     items_view = last.get("itemsView")
     text, truncated = "", items_view not in (None, "Full", "full")
@@ -1478,7 +1515,7 @@ def codex_submit(args):
                    "started_at": time.time(), "changed_at": time.time(), "activity": {},
                    "state": "running", "output": None, "error": None, "final_message": None,
                    "usage": None, "duration_ms": None, "output_unavailable": None,
-                   "active_flags": None, "output_items": {}, "output_view": None, "turn_window": None})
+                   "active_flags": None, "output_items": [], "output_view": None, "turn_window": None})
     params = {"threadId": tid, "input": turn_input,
               "cwd": cwd, "model": wire_model, "effort": effort,
               "sandboxPolicy": sandbox_policy(mode),
@@ -1521,6 +1558,12 @@ def codex_poll(args):
             # saved no end for it, so the read says running, but it will never finish.
             st.update(state="failed", error=entry.get("error"),
                       terminal_at=entry.get("terminal_at") or time.time())
+    dest = None
+    if args.get("copy_to"):
+        dest = os.path.realpath(os.path.join(st["cwd"], os.path.expanduser(str(args["copy_to"]))))
+        reason = refuse_reason(dest)
+        if reason:
+            raise ValueError(f"refusing {dest} as copy_to: {reason}. Name a project or scratch folder.")
     with APP.lock:
         # Everything here repeats on every poll: nothing is consumed, so a lost or
         # duplicated poll costs nothing and there are no pieces to reassemble.
@@ -1589,6 +1632,8 @@ def codex_poll(args):
                 if st.get("turn_id") == turn_id:    # never file this under a turn started since
                     st["output_view"] = view
         out.update(view)
+        if dest and view.get("output_files"):
+            out["output_files"] = copy_outputs(view["output_files"], st["cwd"], dest)
     prune_threads()
     return out
 
@@ -1902,11 +1947,13 @@ TOOLS = [
                         "failed), an activity snapshot (what it is doing and how much it has done), the "
                         "pending approval request(s) when it is waiting — a command, file change, permission "
                         "or an MCP elicitation, each with what is being asked — and the complete output "
-                        "once it is done, with output_files naming the files the turn produced. Idempotent — nothing is consumed, and the answer arrives whole rather than in "
+                        "once it is done, with output_files naming the files the turn produced; copy_to copies them to a folder you name. Idempotent — nothing is consumed, and the answer arrives whole rather than in "
                         "pieces to reassemble. Poll every 20-30s and relay activity in plain language. A thread this "
                         "bridge is not running is read from codex's saved record without taking it (read_only: true): "
                         "its latest results, never its approvals, which belong to the process running it."),
-        "inputSchema": {"type": "object", "properties": {"thread": {"type": "string"}},
+        "inputSchema": {"type": "object", "properties": {
+            "thread": {"type": "string"},
+            "copy_to": {"type": "string", "description": "Folder to copy the finished turn's output files into, absolute or relative to the thread's cwd; created if missing. The bridge does the copy itself, so it works where codex could not write and where you cannot read codex's folders. Each entry of output_files gains copied_to, or copy_error when a different file is already there."}},
                         "required": ["thread"], "additionalProperties": False},
     },
     {

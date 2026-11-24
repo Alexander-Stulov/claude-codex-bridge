@@ -1189,6 +1189,8 @@ except ValueError as e:
 print("smoke: images attach as images; any other file reaches codex by its path")
 
 # --- output files: whatever a turn produced, of any type, is named by codex_poll ----------
+# One list and one rule for every file type. Nothing here is specific to images: a file
+# codex reports saving is listed the same way whichever tool saved it.
 _now = time.time()
 _work, _elsewhere = os.path.realpath(_tf.mkdtemp(prefix="work-")), os.path.realpath(_tf.mkdtemp(prefix="gen-"))
 def _touch(path, age=0, data=b"x"):
@@ -1196,7 +1198,8 @@ def _touch(path, age=0, data=b"x"):
     open(path, "wb").write(data)
     os.utime(path, (_now - age, _now - age))
     return path
-_img = _touch(os.path.join(_elsewhere, "exec-1.png"), data=b"png-bytes")
+_img = _touch(os.path.join(_elsewhere, "exec-1.png"), data=b"png-bytes")             # saved outside cwd
+_deck = _touch(os.path.join(_elsewhere, "deck.pptx"), data=b"pptx-bytes")            # saved outside cwd
 _pdf = _touch(os.path.join(_work, "out", "report.pdf"), data=b"%PDF-1.4")            # a script wrote this
 _edit = _touch(os.path.join(_work, "notes.md"))
 _moved = _touch(os.path.join(_work, "renamed.txt"))
@@ -1215,29 +1218,62 @@ _b64 = "A" * 4096
 bridge.APP._push_item(_st, {"type": "imageGeneration", "id": "i0", "status": "in_progress", "result": ""}, False)
 bridge.APP._push_item(_st, {"type": "imageGeneration", "id": "i1", "status": "completed", "savedPath": _img, "result": _b64}, True)
 bridge.APP._push_item(_st, {"type": "imageGeneration", "id": "i2", "status": "failed", "savedPath": None, "result": ""}, True)
-assert _st["activity"]["images_generated"] == 1, _st["activity"]
-assert _b64 not in json.dumps(_st), "generated image data must never be held by the bridge"
+# an item type this bridge has never heard of: its saved file is listed all the same
+bridge.APP._push_item(_st, {"type": "someLaterTool", "id": "d1", "status": "completed", "savedPath": _deck}, True)
+assert _b64 not in json.dumps(_st), "a saved file's data must never be held by the bridge"
 bridge.APP._push_item(_st, {"type": "fileChange", "id": "f1", "status": "completed", "changes": [
     {"path": "notes.md", "kind": {"type": "add"}, "diff": "+x"},
     {"path": os.path.join(_work, "gone.txt"), "kind": {"type": "delete"}, "diff": "-x"},
     {"path": "old.txt", "kind": {"type": "update", "move_path": _moved}, "diff": ""}]}, True)
 bridge.APP._push_item(_st, {"type": "fileChange", "id": "f2", "status": "failed", "changes": [
     {"path": "never.txt", "kind": {"type": "add"}, "diff": "+x"}]}, True)
-_real_gen = _st["gen"]
 _polled = bridge.codex_poll({"thread": "t91"})
 _files = {f["path"]: f for f in _polled["output_files"]}
-assert set(_files) == {_img, _pdf, _edit, _moved}, sorted(_files)
-assert _files[_img]["source"] == "image_generation" and _files[_img]["bytes"] == 9, _files[_img]
-assert _files[_edit]["source"] == "file_change" and _files[_edit]["kind"] == "add", _files[_edit]
-assert _files[_moved]["source"] == "file_change", _files[_moved]
+assert set(_files) == {_img, _deck, _pdf, _edit, _moved}, sorted(_files)
+for _path in (_img, _deck, _edit, _moved):
+    assert _files[_path]["source"] == "reported", _files[_path]
 assert _files[_pdf]["source"] == "modified_during_turn", _files[_pdf]
+assert _files[_img]["bytes"] == 9, _files[_img]
+assert all(set(f) == {"path", "bytes", "source"} for f in _files.values()), "one shape for every file type"
+assert "image" not in json.dumps({**_polled, "output_files": []}), "no image-specific fields in a poll"
 assert bridge.codex_poll({"thread": "t91"})["output_files"] == _polled["output_files"], "polls must repeat"
+
+# copy_to: the bridge itself copies the files to a folder the caller names, so the handoff
+# depends on neither codex's sandbox nor the caller's
+_dest = os.path.join(os.path.realpath(_tf.mkdtemp(prefix="dest-")), "handoff")      # not created yet
+_copied = {f["path"]: f for f in bridge.codex_poll({"thread": "t91", "copy_to": _dest})["output_files"]}
+assert _copied[_img]["copied_to"] == os.path.join(_dest, "exec-1.png"), _copied[_img]
+assert _copied[_deck]["copied_to"] == os.path.join(_dest, "deck.pptx"), _copied[_deck]
+assert _copied[_pdf]["copied_to"] == os.path.join(_dest, "out", "report.pdf"), "a file under cwd keeps its place"
+assert open(_copied[_img]["copied_to"], "rb").read() == b"png-bytes"
+assert open(_copied[_pdf]["copied_to"], "rb").read() == b"%PDF-1.4"
+assert bridge.codex_poll({"thread": "t91", "copy_to": _dest})["output_files"] == list(_copied.values()), \
+    "copying again must change nothing"
+# a different file already at the destination is never replaced
+open(os.path.join(_dest, "deck.pptx"), "wb").write(b"the caller's own deck")
+_clash = {f["path"]: f for f in bridge.codex_poll({"thread": "t91", "copy_to": _dest})["output_files"]}
+assert "copied_to" not in _clash[_deck] and "already" in _clash[_deck]["copy_error"], _clash[_deck]
+assert open(os.path.join(_dest, "deck.pptx"), "rb").read() == b"the caller's own deck"
+assert _clash[_img]["copied_to"] == os.path.join(_dest, "exec-1.png"), "one clash must not stop the rest"
+# into cwd, by a relative name: only the files outside cwd need copying
+_into = {f["path"]: f for f in bridge.codex_poll({"thread": "t91", "copy_to": "."})["output_files"]}
+assert _into[_img]["copied_to"] == os.path.join(_work, "exec-1.png"), _into[_img]
+assert "copied_to" not in _into[_pdf] and "copy_error" not in _into[_pdf], "already there: nothing to do"
+try:
+    bridge.codex_poll({"thread": "t91", "copy_to": os.path.expanduser("~")})
+    raise AssertionError("copy_to accepted the whole home directory")
+except ValueError as e:
+    assert "copy_to" in str(e), e
+assert "copy_to" in _tools["codex_poll"]["inputSchema"]["properties"], "copy_to not exposed"
+assert "copy_to" not in _tools["codex_poll"]["inputSchema"]["required"]
 
 # a read turn wrote nothing of its own, so what changed around it is not its output
 _output_thread("t92", mode="read")
 assert "output_files" not in bridge.codex_poll({"thread": "t92"}), "a read turn claimed workspace files"
 
 # a long list is capped, and says how much it left out
+for _name in ("exec-1.png", "deck.pptx"):          # the copies made into cwd just above
+    os.remove(os.path.join(_work, _name))
 _real_cap, bridge.MAX_OUTPUT_FILES = bridge.MAX_OUTPUT_FILES, 2
 try:
     _output_thread("t93")
@@ -1252,13 +1288,14 @@ bridge._adopt_thread_record(_st, {"turns": [{"id": "u9", "status": "completed", 
     "completedAt": int(_now + 1), "items": [
         {"type": "imageGeneration", "id": "i9", "status": "completed", "savedPath": _img, "result": _b64},
         {"type": "agentMessage", "id": "m9", "text": "done"}]}]})
-assert _b64 not in json.dumps(_st), "a read-back turn must not keep the image data"
+assert _b64 not in json.dumps(_st), "a read-back turn must not keep the file's data"
 _cold = {f["path"]: f["source"] for f in bridge.turn_output_files(_st)[0]}
-assert _cold[_img] == "image_generation" and _cold[_pdf] == "modified_during_turn", _cold
+assert _cold[_img] == "reported" and _cold[_pdf] == "modified_during_turn", _cold
 bridge.APP.threads.clear()
 
-for marker in ("output_files", "modified_during_turn"):
+for marker in ("output_files", "modified_during_turn", "copy_to"):
     assert marker in bridge.INSTRUCTIONS, f"instructions missing {marker!r}"
+assert "image_generation" not in bridge.INSTRUCTIONS, "output files are one list, with no image-specific kind"
 assert "confined to cwd" not in bridge.INSTRUCTIONS.replace("confined to cwd and the system temp", ""), \
     "the sandbox also allows the system temp folders"
-print("smoke: codex_poll names every output file, of any type, without holding its contents")
+print("smoke: codex_poll names every output file, of any type, and copies them where the caller asks")
