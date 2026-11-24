@@ -1166,28 +1166,6 @@ bridge.APP._push_item(_st, {"type": "contextCompaction", "id": "c1"}, True)
 assert _st["activity"]["compactions"] == 1, _st["activity"]
 print("smoke: a compaction is counted once, when it completes")
 
-# --- attachments: an image goes as an image, any other file goes by its path --------------
-# codex turns a non-image localImage into a placeholder and the turn still "completes"
-# with the model unable to read it (observed live 2026-11-18 with a PDF, a text file and a
-# text file named .png). Decided by the bytes, because the name proved nothing there.
-_d = _tf.mkdtemp()
-for _name, _bytes in (("shot.png", b"\x89PNG\r\n\x1a\n...."), ("photo.jpg", b"\xff\xd8\xff\xe0...."),
-                      ("anim.gif", b"GIF89a...."), ("pic.webp", b"RIFF\x10\x00\x00\x00WEBPVP8 "),
-                      ("report.pdf", b"%PDF-1.4\n"), ("fake.png", b"just text\n")):
-    open(os.path.join(_d, _name), "wb").write(_bytes)
-_items = bridge.build_input("look", ["shot.png", "photo.jpg", "anim.gif", "pic.webp", "report.pdf", "fake.png"], _d)
-assert [i["type"] for i in _items[1:5]] == ["localImage"] * 4, _items
-_notes = _items[5:]
-assert [i["type"] for i in _notes] == ["text", "text"], _items
-for _note, _name in zip(_notes, ("report.pdf", "fake.png")):
-    assert os.path.realpath(os.path.join(_d, _name)) in _note["text"], _note
-try:
-    bridge.build_input("look", ["missing.pdf"], _d)
-    raise AssertionError("a missing file was accepted")
-except ValueError as e:
-    assert "not found" in str(e), e
-print("smoke: images attach as images; any other file reaches codex by its path")
-
 # --- output files: whatever a turn produced, of any type, is named by codex_poll ----------
 # One list and one rule for every file type. Nothing here is specific to images: a file
 # codex reports saving is listed the same way whichever tool saved it.

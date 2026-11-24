@@ -92,7 +92,7 @@ NETWORK: codex has network access in both modes, always - web search, http, pack
 
 JSON ANY TIME: pass output_schema on any turn - new or existing thread - and that turn's final message is constrained to it. Omit it for prose.
 
-ATTACHMENTS: pass images on any turn - a list of file paths (absolute or relative to cwd) or http(s)/data URLs. Screenshots, mockups, diagrams, a rendering that looks wrong. A PNG, JPEG, GIF or WebP reaches the model as an image; any other file (a PDF, a document, data) reaches codex by its path and codex opens it with its own tools. A bad path is rejected before the turn starts.
+IMAGES: pass images on any turn - a list of file paths (absolute or relative to cwd) or http(s)/data URLs. Screenshots, mockups, diagrams, a rendering that looks wrong. A bad path is rejected before the turn starts.
 
 OUTPUT FILES: when a turn ends, codex_poll lists the files it produced in output_files, whatever their type - a document, a PDF, a deck, an image, source code - each with path, bytes and source. reported is a file codex itself reported writing; some of its tools save under codex's own home rather than in cwd. modified_during_turn is a file under cwd that changed while the turn ran, such as a PDF a script wrote, and can include edits made by anyone else working there. To take the files, pass copy_to on codex_poll - a folder, absolute or relative to cwd: the bridge copies every listed file there itself, outside codex's sandbox and yours, and each entry gains copied_to. A file under cwd keeps its relative path, a file already in that folder is left alone, and a different file already at the destination is never replaced - that entry carries copy_error instead. Do not ask codex to copy its outputs to you: it does not always know where its own tools saved them. A file a command wrote outside cwd is not listed, so have codex write into cwd or name the path in its answer. output_files_omitted counts entries past the first 100, and output_files_incomplete means a very large cwd was not fully checked.
 
@@ -359,26 +359,12 @@ def compaction_runway(window, used):
 IMAGE_URL_SCHEMES = ("http://", "https://", "data:")
 
 
-def is_image_file(path):
-    """Whether codex can show this file to the model as an image. Read from the bytes, not
-    the name: anything else sent as localImage reaches the model as an unreadable
-    placeholder, and the turn still completes."""
-    try:
-        with open(path, "rb") as f:
-            head = f.read(12)
-    except OSError:
-        return True         # unreadable from here: codex reports it in its own words
-    return (head.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"))
-            or (head[:4] == b"RIFF" and head[8:12] == b"WEBP"))
-
-
 def build_input(prompt, images, cwd, skills=None):
-    """A turn's input is a list of typed items: any skills to inject, the text, then attachments.
+    """A turn's input is a list of typed items: any skills to inject, the text, then images.
 
     A URL and a file on disk are different wire types, so the caller passes plain
-    strings and this decides. An image goes as an image; any other file goes by its path,
-    for codex to open with its own tools. Bad paths are caught here — before the turn
-    starts — because a turn that dies on a missing file wastes the whole round trip.
+    strings and this decides. Bad paths are caught here — before the turn starts —
+    because a turn that dies on a missing file wastes the whole round trip.
     """
     items = list(skills or []) + [{"type": "text", "text": str(prompt)}]
     for ref in images or []:
@@ -393,10 +379,7 @@ def build_input(prompt, images, cwd, skills=None):
         if not os.path.isfile(path):
             raise ValueError(f"image not found: {ref!r} (resolved to {path}). Pass an absolute "
                              f"path, a path relative to cwd, or an http(s)/data URL.")
-        if is_image_file(path):
-            items.append({"type": "localImage", "path": path})
-        else:
-            items.append({"type": "text", "text": f"Attached file, open it from disk: {path}"})
+        items.append({"type": "localImage", "path": path})
     return items
 
 
@@ -1921,7 +1904,7 @@ TOOLS = [
             "mode": {"type": "string", "enum": list(MODES), "description": "write (default) or read. Both keep network access (always on) and the full tool surface."},
             "output_schema": {"type": ["object", "string"], "description": "JSON Schema constraining this turn's final message. Omit for prose."},
             "images": {"type": "array", "items": {"type": "string"},
-                       "description": "Files to send with this turn — screenshots, mockups, diagrams, a failing UI, or any other file. Each entry is a file path (absolute, or relative to cwd) or an http(s)/data URL. A PNG, JPEG, GIF or WebP reaches the model as an image; any other file reaches codex by its path. Works on any turn, new thread or follow-up."},
+                       "description": "Images to send with this turn — screenshots, mockups, diagrams, a failing UI. Each entry is a file path (absolute, or relative to cwd) or an http(s)/data URL. Works on any turn, new thread or follow-up."},
             "skills": {"type": "array", "items": {"type": "string"},
                        "description": "Skills to inject into this turn, by the names codex_capabilities lists (deep-research-work:deep-research, or just deep-research when that is unique). Each skill's instructions go on the wire with the input — a $mention typed into the prompt is not honoured. Unknown, ambiguous or disabled names are rejected before the turn starts."}},
             "required": ["prompt", "model"], "additionalProperties": False},

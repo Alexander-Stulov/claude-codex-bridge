@@ -323,9 +323,6 @@ A `read` turn lists no `modified_during_turn` files. A file a command wrote outs
 is not listed. `output_files_omitted` counts entries past the first 100, and
 `output_files_incomplete` means a very large `cwd` was not fully checked.
 
-`images` on `codex_submit` accepts any file. A PNG, JPEG, GIF or WebP reaches the model
-as an image; any other file reaches codex by its path.
-
 Measured on one 120-function survey:
 
 | brief shape | size | at 5,000 items | enforced? |
