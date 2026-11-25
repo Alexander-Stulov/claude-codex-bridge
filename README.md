@@ -188,7 +188,7 @@ reached the bridge (not only `codex exec`), run `python3 tests/context_live.py`.
 | `codex_capabilities` | What codex can do here: plugins and their skills, MCP servers and tools, connected apps |
 | `codex_submit` | Start a thread, add a turn to one, or steer a running turn. Returns immediately |
 | `codex_fork` | Copy a thread's history to a new id: branch on purpose, or continue a thread another process has open |
-| `codex_poll` | State, progress snapshot, pending approvals, and the complete output once done; a thread the bridge is not running is read without taking it |
+| `codex_poll` | State, progress snapshot, pending approvals, and the complete output and output files once done, copied to a folder you name with `copy_to`; a thread the bridge is not running is read without taking it |
 | `codex_approve` | Rule on an approval the thread is parked on — a command, file change, permission, or an MCP server's elicitation |
 | `codex_interrupt` | Stop the active turn; the thread stays usable |
 | `codex_compact` | Summarise the thread's history now, at a boundary you choose |
@@ -301,8 +301,27 @@ returned the right answer.
 Ask for the answer as the turn's **output**, not as a report file. Output is capped
 by the model's own output limit, arrives whole through `codex_poll`, and its shape
 can be *enforced* with `output_schema` — a file has none of that, and the bridge
-cannot even see one. Write files only when the file is the work product itself
+returns only its path. Write files only when the file is the work product itself
 (source changes, a document that belongs in the repo).
+
+When a turn ends, `codex_poll` lists the files it produced in `output_files`, whatever
+their type — a document, a PDF, a deck, an image, source code — each with `path`, `bytes`
+and `source`:
+
+| `source` | What it means |
+|---|---|
+| `reported` | A file codex itself reported writing. Some of its tools save under codex's own home rather than in `cwd` |
+| `modified_during_turn` | A file under `cwd` that changed while the turn ran, such as a PDF a script wrote. Edits made by anyone else working there appear too |
+
+To take the files, pass `copy_to` on `codex_poll`: a folder, absolute or relative to
+`cwd`. The bridge copies every listed file there itself, so the handoff depends on neither
+codex's sandbox nor the caller's, and each entry gains `copied_to`. A file under `cwd`
+keeps its relative path, a file already in that folder is left alone, and a different
+file already at the destination is never replaced: that entry carries `copy_error`.
+
+A `read` turn lists no `modified_during_turn` files. A file a command wrote outside `cwd`
+is not listed. `output_files_omitted` counts entries past the first 100, and
+`output_files_incomplete` means a very large `cwd` was not fully checked.
 
 Measured on one 120-function survey:
 
@@ -321,7 +340,7 @@ and patterns plus the exceptions worth naming, never a truncated enumeration. Un
 ## Where it runs
 
 `cwd` is the only location knob: any existing directory, nothing to register. Reads
-see the surrounding repo; writes are confined to `cwd`. Omit it and the thread gets
+see the surrounding repo; writes are confined to `cwd` and the system temp folders. Omit it and the thread gets
 a private scratch workspace. Point concurrent write threads at different `cwd`
 (separate worktrees, say) and they cannot collide.
 
@@ -409,7 +428,7 @@ in the map with their mentions.
 
 Network access is on in both modes, always — web search, HTTP, package installs,
 git remotes; there is nothing to enable or approve. Containment is the sandbox
-(writes confined to `cwd`), not the network.
+(writes confined to `cwd` and the system temp folders), not the network.
 
 ## Guarantees
 
